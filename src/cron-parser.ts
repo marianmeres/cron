@@ -1,5 +1,12 @@
-class CronParser {
-	constructor(expression) {
+export class CronParser {
+	readonly expression: string;
+	readonly minute: number[];
+	readonly hour: number[];
+	readonly dayOfMonth: number[];
+	readonly month: number[];
+	readonly dayOfWeek: number[];
+
+	constructor(expression: string) {
 		this.expression = expression;
 
 		// Validate allowed characters
@@ -15,46 +22,56 @@ class CronParser {
 			throw new Error("Cron expression must have exactly 5 fields");
 		}
 
-		// Validate each field
-		this.minute = this.parseField(parts[0], 0, 59, "minute");
-		this.hour = this.parseField(parts[1], 0, 23, "hour");
-		this.dayOfMonth = this.parseField(parts[2], 1, 31, "day of month");
-		this.month = this.parseField(parts[3], 1, 12, "month");
-		this.dayOfWeek = this.parseField(parts[4], 0, 6, "day of week");
+		this.minute = this._parseField(parts[0], 0, 59, "minute");
+		this.hour = this._parseField(parts[1], 0, 23, "hour");
+		this.dayOfMonth = this._parseField(parts[2], 1, 31, "day of month");
+		this.month = this._parseField(parts[3], 1, 12, "month");
+		this.dayOfWeek = this._parseField(parts[4], 0, 6, "day of week");
 	}
 
-	parseField(field, min, max, fieldName) {
+	private _parseField(
+		field: string,
+		min: number,
+		max: number,
+		fieldName: string,
+	): number[] {
 		// Wildcard
 		if (field === "*") {
-			return this.range(min, max);
+			return this._range(min, max);
 		}
 
-		// Step values
+		// Step values (*/5 or 2-10/3)
 		if (field.includes("/")) {
 			const [range, step] = field.split("/");
 			const stepNum = parseInt(step);
 
 			if (isNaN(stepNum) || stepNum <= 0) {
-				throw new Error(`Invalid step value in ${fieldName}: ${step}`);
+				throw new Error(
+					`Invalid step value in ${fieldName}: ${step}`,
+				);
 			}
 
 			if (range === "*") {
-				return this.range(min, max).filter((_, i) => i % stepNum === 0);
+				return this._range(min, max).filter(
+					(_, i) => i % stepNum === 0,
+				);
 			}
 
 			const [start, end] = range.split("-").map(Number);
-			this.validateRange(start, end, min, max, fieldName);
-			return this.range(start, end).filter((v, i) => i % stepNum === 0);
+			this._validateRange(start, end, min, max, fieldName);
+			return this._range(start, end).filter(
+				(_, i) => i % stepNum === 0,
+			);
 		}
 
-		// Range
+		// Range (1-5)
 		if (field.includes("-")) {
 			const [start, end] = field.split("-").map(Number);
-			this.validateRange(start, end, min, max, fieldName);
-			return this.range(start, end);
+			this._validateRange(start, end, min, max, fieldName);
+			return this._range(start, end);
 		}
 
-		// List
+		// List (1,3,5)
 		if (field.includes(",")) {
 			const values = field.split(",").map(Number);
 			values.forEach((v) => {
@@ -77,9 +94,17 @@ class CronParser {
 		return [value];
 	}
 
-	validateRange(start, end, min, max, fieldName) {
+	private _validateRange(
+		start: number,
+		end: number,
+		min: number,
+		max: number,
+		fieldName: string,
+	): void {
 		if (isNaN(start) || isNaN(end)) {
-			throw new Error(`Invalid range in ${fieldName}: ${start}-${end}`);
+			throw new Error(
+				`Invalid range in ${fieldName}: ${start}-${end}`,
+			);
 		}
 		if (start < min || start > max || end < min || end > max) {
 			throw new Error(
@@ -93,27 +118,26 @@ class CronParser {
 		}
 	}
 
-	range(start, end) {
+	private _range(start: number, end: number): number[] {
 		return Array.from({ length: end - start + 1 }, (_, i) => start + i);
 	}
 
-	matches(date) {
+	matches(date: Date): boolean {
 		return (
 			this.minute.includes(date.getMinutes()) &&
 			this.hour.includes(date.getHours()) &&
 			this.dayOfMonth.includes(date.getDate()) &&
-			this.month.includes(date.getMonth() + 1) && // JS months are 0-indexed
+			this.month.includes(date.getMonth() + 1) &&
 			this.dayOfWeek.includes(date.getDay())
 		);
 	}
 
-	getNextRun(fromDate = new Date()) {
+	getNextRun(fromDate: Date = new Date()): Date {
 		const next = new Date(fromDate);
-		next.setSeconds(0, 0); // Reset seconds and milliseconds
-		next.setMinutes(next.getMinutes() + 1); // Start from next minute
+		next.setSeconds(0, 0);
+		next.setMinutes(next.getMinutes() + 1);
 
-		// Prevent infinite loops with a reasonable limit
-		const maxIterations = 366 * 24 * 60; // One year worth of minutes
+		const maxIterations = 366 * 24 * 60; // one year of minutes
 		let iterations = 0;
 
 		while (!this.matches(next) && iterations < maxIterations) {
@@ -122,7 +146,9 @@ class CronParser {
 		}
 
 		if (iterations >= maxIterations) {
-			throw new Error("Could not find next run time within one year");
+			throw new Error(
+				"Could not find next run time within one year",
+			);
 		}
 
 		return next;
