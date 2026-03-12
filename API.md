@@ -87,11 +87,15 @@ Hard-deletes a job and its run log from the database. Also removes the in-memory
 
 #### `cron.setHandler(name, handler): Cron`
 
-Sets or replaces the in-memory handler without touching the database. Chainable.
+Sets or replaces the in-memory handler without touching the database. Pass `null` or `undefined` to remove the handler. Chainable.
 
 #### `cron.removeHandler(name): Cron`
 
 Removes the in-memory handler. Chainable.
+
+#### `cron.resetHandlers(): void`
+
+Removes all registered in-memory handlers.
 
 #### `cron.hasHandler(name): boolean`
 
@@ -142,13 +146,13 @@ Returns the execution log for a job, newest first.
 
 Resets stuck `running` jobs back to `idle` (crash recovery). Default threshold: 5 minutes.
 
-#### `cron.healthPreview(sinceMinutesAgo?: number): Promise<any[]>`
+#### `cron.healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>`
 
 Returns execution statistics grouped by `status`. Useful for monitoring dashboards.
 
 ```typescript
 const stats = await cron.healthPreview(60); // last 60 minutes
-// [{ status: "success", count: "42", avg_duration_seconds: "0.3" }, ...]
+// [{ status: "success", count: 42, avg_duration_seconds: 0.3 }, ...]
 ```
 
 ---
@@ -228,6 +232,20 @@ interface CronRunLog {
   error_details: Record<string, any> | null;
 }
 ```
+
+### `CronHealthPreviewRow`
+
+```typescript
+interface CronHealthPreviewRow {
+  status: string;
+  count: number;
+  avg_duration_seconds: number | null;
+}
+```
+
+A single row from the health preview query, representing execution statistics grouped by run status.
+
+---
 
 ### `CronHandler`
 

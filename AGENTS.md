@@ -143,7 +143,7 @@ TEST_PG_PORT=5432
 ```typescript
 export { Cron } from "./cron.ts";
 export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
-export type { CronJob, CronRunLog, CronHandler, CronOptions, CronRegisterOptions, CronContext } from "./cron.ts";
+export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler, CronOptions, CronRegisterOptions, CronContext } from "./cron.ts";
 export { CronParser } from "./cron-parser.ts";
 ```
 
