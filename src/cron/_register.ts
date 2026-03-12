@@ -30,10 +30,10 @@ export async function _register(
 	// prettier-ignore
 	const { rows } = await db.query(
 		`INSERT INTO ${tableCron}
-			(name, expression, payload, enabled, next_run_at,
+			(project_id, name, expression, payload, enabled, next_run_at,
 			 max_attempts, max_attempt_duration_ms, backoff_strategy)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (name) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (project_id, name) DO UPDATE SET
 			expression              = EXCLUDED.expression,
 			payload                 = EXCLUDED.payload,
 			enabled                 = EXCLUDED.enabled,
@@ -44,6 +44,7 @@ export async function _register(
 			updated_at              = NOW()
 		RETURNING *`,
 		[
+			context.projectId,
 			data.name,
 			data.expression,
 			JSON.stringify(data.payload),

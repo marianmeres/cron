@@ -26,6 +26,11 @@ import {
 } from "./utils/db-health.ts";
 
 /**
+ * Default project identifier used when no `projectId` is specified.
+ */
+export const DEFAULT_PROJECT_ID = "_default";
+
+/**
  * Available cron job statuses.
  *
  * - `IDLE` - Job is waiting for its next scheduled run
@@ -82,6 +87,7 @@ export interface CronContext {
 	logger: Logger;
 	pubsubDone: ReturnType<typeof createPubSub>;
 	pubsubError: ReturnType<typeof createPubSub>;
+	projectId: string;
 }
 
 /**
@@ -93,6 +99,7 @@ export interface CronContext {
 export interface CronJob {
 	id: number;
 	uid: string;
+	project_id: string;
 	name: string;
 	expression: string;
 	// deno-lint-ignore no-explicit-any
@@ -120,6 +127,7 @@ export interface CronRunLog {
 	id: number;
 	cron_id: number;
 	cron_name: string;
+	project_id: string;
 	/** The next_run_at value that was claimed — used for drift-safe scheduling */
 	scheduled_at: Date;
 	started_at: Date;
@@ -179,6 +187,8 @@ export interface CronRegisterOptions {
 export interface CronOptions {
 	db: pg.Pool | pg.Client;
 	logger?: Logger;
+	/** Project scope identifier (default: '_default') */
+	projectId?: string;
 	/** Table name prefix, e.g. "myschema." for schema qualification */
 	tablePrefix?: string;
 	/** Polling interval in milliseconds when no jobs are due (default: 1000) */
@@ -197,6 +207,51 @@ export interface CronOptions {
 		  };
 }
 
+/**
+ * A lightweight project-scoped view over a shared `Cron` instance.
+ *
+ * Created via `cron.forProject(projectId)`. Shares the processor pool
+ * with the parent `Cron` — only management methods are project-scoped.
+ */
+export interface CronProjectScope {
+	readonly projectId: string;
+	register(
+		name: string,
+		expression: string,
+		handler: CronHandler,
+		options?: CronRegisterOptions
+	): Promise<CronJob>;
+	unregister(name: string): Promise<void>;
+	enable(name: string): Promise<CronJob>;
+	disable(name: string): Promise<CronJob>;
+	find(name: string): Promise<CronJob | null>;
+	fetchAll(options?: {
+		enabled?: boolean;
+		status?: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
+		limit?: number;
+		offset?: number;
+	}): Promise<CronJob[]>;
+	getRunHistory(
+		name: string,
+		options?: { limit?: number; offset?: number; sinceMinutesAgo?: number }
+	): Promise<CronRunLog[]>;
+	healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>;
+	cleanup(maxAllowedRunDurationMinutes?: number): Promise<void>;
+	setHandler(name: string, handler: CronHandler | undefined | null): CronProjectScope;
+	hasHandler(name: string): boolean;
+	removeHandler(name: string): CronProjectScope;
+	onDone(
+		name: string | string[],
+		cb: (job: CronJob) => void,
+		skipIfExists?: boolean
+	): Unsubscriber;
+	onError(
+		name: string | string[],
+		cb: (job: CronJob) => void,
+		skipIfExists?: boolean
+	): Unsubscriber;
+}
+
 /** @internal */
 function _tableNames(tablePrefix: string = ""): CronContext["tableNames"] {
 	return {
@@ -211,25 +266,23 @@ function _tableNames(tablePrefix: string = ""): CronContext["tableNames"] {
  * Manages named cron jobs with PostgreSQL persistence, `FOR UPDATE SKIP LOCKED`
  * claiming for safe concurrent workers, and drift-safe `next_run_at` scheduling.
  *
+ * Processors are global — a single `start()` call serves all projects.
+ * Use `forProject()` to get a project-scoped management view sharing the same
+ * processor pool.
+ *
  * @example
  * ```typescript
  * import { Cron } from "@marianmeres/cron";
  *
  * const cron = new Cron({ db: pgPool });
  *
- * await cron.register("backup", "0 2 * * *", async (job) => {
- *   await runBackup(job.payload);
- *   return { backed_up: true };
- * });
+ * const projA = cron.forProject("project-a");
+ * const projB = cron.forProject("project-b");
  *
- * await cron.start(1);
+ * await projA.register("report", "0 9 * * *", handlerA);
+ * await projB.register("report", "0 18 * * *", handlerB);
  *
- * cron.onDone("backup", (job) => {
- *   console.log(`Backup completed, next run: ${job.next_run_at}`);
- * });
- *
- * // On shutdown:
- * await cron.stop();
+ * await cron.start(2); // single pool processes ALL projects
  * ```
  */
 export class Cron {
@@ -265,6 +318,7 @@ export class Cron {
 			tablePrefix = "",
 			logger = createClog("cron"),
 			gracefulSigterm = true,
+			projectId = DEFAULT_PROJECT_ID,
 			dbRetry,
 			dbHealthCheck,
 		} = options || {};
@@ -296,7 +350,21 @@ export class Cron {
 			logger: this.#logger,
 			pubsubDone: this.#pubsubDone,
 			pubsubError: this.#pubsubError,
+			projectId,
 		};
+	}
+
+	// --- Private helpers ---
+
+	/** Composite key for the handler map: `${projectId}\0${name}` */
+	#handlerKey(projectId: string, name: string): string {
+		return `${projectId}\0${name}`;
+	}
+
+	/** Returns a CronContext scoped to a specific projectId */
+	#projectContext(projectId: string): CronContext {
+		if (projectId === this.#context.projectId) return this.#context;
+		return { ...this.#context, projectId };
 	}
 
 	/** Wrapper for database operations with optional retry */
@@ -322,6 +390,8 @@ export class Cron {
 		}
 	}
 
+	// --- Processor (global — claims any due job regardless of project) ---
+
 	async #processJobs(processorId: string): Promise<void> {
 		const noopHandler: CronHandler = (_job) => ({ noop: true });
 		const limit = 10;
@@ -332,13 +402,16 @@ export class Cron {
 				if (job) {
 					this.#activeJobs.add(job.id);
 					try {
-						this.#logger?.debug?.(`Executing cron job "${job.name}"...`);
-						const handler = this.#handlers.get(job.name);
+						const key = this.#handlerKey(job.project_id, job.name);
+						const handler = this.#handlers.get(key);
 						if (!handler) {
 							this.#logger?.warn?.(
-								`No handler for cron job "${job.name}", using noop`
+								`No handler for cron job "${job.name}" (project: ${job.project_id}), using noop`
 							);
 						}
+						this.#logger?.debug?.(
+							`Executing cron job "${job.name}" (project: ${job.project_id})...`
+						);
 						await _executeCronJob(
 							this.#context,
 							job,
@@ -380,13 +453,209 @@ export class Cron {
 		this.#logger?.debug?.(`Cron processor "${processorId}" stopped`);
 	}
 
-	// --- Handler management ---
+	// --- Private #do* methods (project-parameterized) ---
+
+	async #doRegister(
+		projectId: string,
+		name: string,
+		expression: string,
+		handler: CronHandler,
+		options: CronRegisterOptions = {}
+	): Promise<CronJob> {
+		const {
+			payload = {},
+			enabled = true,
+			max_attempts = 1,
+			max_attempt_duration_ms = 0,
+			backoff_strategy = BACKOFF_STRATEGY.NONE,
+			forceNextRunRecalculate = false,
+		} = options;
+
+		// Validate expression early (throws on invalid)
+		new CronParser(expression);
+
+		await this.#initializeOnce();
+
+		this.#doSetHandler(projectId, name, handler);
+
+		return await _register(
+			this.#projectContext(projectId),
+			{
+				name,
+				expression,
+				payload,
+				enabled,
+				max_attempts,
+				max_attempt_duration_ms,
+				backoff_strategy,
+			},
+			forceNextRunRecalculate
+		);
+	}
+
+	async #doUnregister(projectId: string, name: string): Promise<void> {
+		await this.#initializeOnce();
+		const { db, tableNames } = this.#context;
+		const { tableCron } = tableNames;
+		await db.query(
+			`DELETE FROM ${tableCron} WHERE project_id = $1 AND name = $2`,
+			[projectId, name]
+		);
+		this.#handlers.delete(this.#handlerKey(projectId, name));
+	}
+
+	async #doEnable(projectId: string, name: string): Promise<CronJob> {
+		await this.#initializeOnce();
+		const { db, tableNames } = this.#context;
+		const { tableCron } = tableNames;
+		const { rows } = await db.query(
+			`UPDATE ${tableCron}
+			SET enabled = TRUE, updated_at = NOW()
+			WHERE project_id = $1 AND name = $2
+			RETURNING *`,
+			[projectId, name]
+		);
+		return rows[0] as CronJob;
+	}
+
+	async #doDisable(projectId: string, name: string): Promise<CronJob> {
+		await this.#initializeOnce();
+		const { db, tableNames } = this.#context;
+		const { tableCron } = tableNames;
+		const { rows } = await db.query(
+			`UPDATE ${tableCron}
+			SET enabled = FALSE, updated_at = NOW()
+			WHERE project_id = $1 AND name = $2
+			RETURNING *`,
+			[projectId, name]
+		);
+		return rows[0] as CronJob;
+	}
+
+	async #doFind(projectId: string, name: string): Promise<CronJob | null> {
+		await this.#initializeOnce();
+		return await _findByName(this.#projectContext(projectId), name);
+	}
+
+	async #doFetchAll(
+		projectId: string,
+		options: {
+			enabled?: boolean;
+			status?: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
+			limit?: number;
+			offset?: number;
+		} = {}
+	): Promise<CronJob[]> {
+		await this.#initializeOnce();
+
+		const conditions: string[] = [];
+		if (options.enabled !== undefined) {
+			conditions.push(`enabled = ${options.enabled ? "TRUE" : "FALSE"}`);
+		}
+		if (options.status) {
+			conditions.push(`status = ${pgQuoteValue(options.status)}`);
+		}
+
+		const where = conditions.length ? conditions.join(" AND ") : null;
+		return await _fetchAll(this.#projectContext(projectId), where, options);
+	}
+
+	async #doGetRunHistory(
+		projectId: string,
+		name: string,
+		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
+	): Promise<CronRunLog[]> {
+		await this.#initializeOnce();
+		const ctx = this.#projectContext(projectId);
+		const job = await _findByName(ctx, name);
+		if (!job) return [];
+		return await _logRunFetchAll(ctx, job.id, options);
+	}
+
+	async #doHealthPreview(
+		projectId: string,
+		sinceMinutesAgo: number = 60
+	): Promise<CronHealthPreviewRow[]> {
+		await this.#initializeOnce();
+		return await _healthPreview(this.#projectContext(projectId), sinceMinutesAgo);
+	}
+
+	async #doCleanup(
+		projectId: string,
+		maxAllowedRunDurationMinutes: number = 5,
+		projectScoped: boolean = true
+	): Promise<void> {
+		await this.#initializeOnce();
+		return await _markStale(
+			this.#projectContext(projectId),
+			maxAllowedRunDurationMinutes,
+			projectScoped
+		);
+	}
+
+	#doSetHandler(
+		projectId: string,
+		name: string,
+		handler: CronHandler | undefined | null
+	): void {
+		const key = this.#handlerKey(projectId, name);
+		if (typeof handler === "function") {
+			this.#handlers.set(key, handler);
+		} else {
+			this.#handlers.delete(key);
+		}
+	}
+
+	#doHasHandler(projectId: string, name: string): boolean {
+		return this.#handlers.has(this.#handlerKey(projectId, name));
+	}
+
+	#doRemoveHandler(projectId: string, name: string): void {
+		this.#handlers.delete(this.#handlerKey(projectId, name));
+	}
+
+	#doOnEvent(
+		projectId: string,
+		pubsub: ReturnType<typeof createPubSub>,
+		name: string | string[],
+		cb: (job: CronJob) => void,
+		skipIfExists: boolean
+	): Unsubscriber {
+		const names = Array.isArray(name) ? name : [name];
+		const unsubs: (() => void)[] = [];
+
+		// wrap to prevent unhandled errors from killing the process
+		if (!Cron.#onEventWraps.has(cb)) {
+			Cron.#onEventWraps.set(cb, async (job: CronJob) => {
+				try {
+					await cb(job);
+				} catch (e) {
+					this.#logger?.error?.(`onEvent ${name}: ${e}`);
+				}
+			});
+		}
+		const wrapped = Cron.#onEventWraps.get(cb) as (job: CronJob) => Promise<void>;
+
+		names.forEach((n) => {
+			const key = this.#handlerKey(projectId, n);
+			if (!skipIfExists || !pubsub.isSubscribed(key, wrapped)) {
+				const unsub = pubsub.subscribe(key, wrapped);
+				unsubs.push(() => {
+					unsub();
+					Cron.#onEventWraps.delete(cb);
+				});
+			}
+		});
+		return () => unsubs.forEach((u) => u());
+	}
+
+	// --- Public: Handler management ---
 
 	/**
 	 * Returns `true` if an in-memory handler is registered for the given name.
 	 */
 	hasHandler(name: string): boolean {
-		return this.#handlers.has(name);
+		return this.#doHasHandler(this.#context.projectId, name);
 	}
 
 	/**
@@ -397,11 +666,7 @@ export class Cron {
 	 * @returns The Cron instance for method chaining
 	 */
 	setHandler(name: string, handler: CronHandler | undefined | null): Cron {
-		if (typeof handler === "function") {
-			this.#handlers.set(name, handler);
-		} else {
-			this.#handlers.delete(name);
-		}
+		this.#doSetHandler(this.#context.projectId, name, handler);
 		return this;
 	}
 
@@ -411,7 +676,7 @@ export class Cron {
 	 * @returns The Cron instance for method chaining
 	 */
 	removeHandler(name: string): Cron {
-		this.#handlers.delete(name);
+		this.#doRemoveHandler(this.#context.projectId, name);
 		return this;
 	}
 
@@ -420,10 +685,13 @@ export class Cron {
 		this.#handlers.clear();
 	}
 
-	// --- Lifecycle ---
+	// --- Lifecycle (global — not project-scoped) ---
 
 	/**
 	 * Initializes the database schema (if needed) and starts N polling workers.
+	 *
+	 * Processors are global — they claim any due job regardless of project.
+	 * One `start()` call serves all projects.
 	 *
 	 * @param processorsCount - Number of concurrent workers (default: 2)
 	 */
@@ -493,7 +761,7 @@ export class Cron {
 		return await _uninstall(this.#context);
 	}
 
-	// --- Registration ---
+	// --- Registration (project-scoped) ---
 
 	/**
 	 * Registers (or updates) a cron job and its handler.
@@ -510,34 +778,12 @@ export class Cron {
 		handler: CronHandler,
 		options: CronRegisterOptions = {}
 	): Promise<CronJob> {
-		const {
-			payload = {},
-			enabled = true,
-			max_attempts = 1,
-			max_attempt_duration_ms = 0,
-			backoff_strategy = BACKOFF_STRATEGY.NONE,
-			forceNextRunRecalculate = false,
-		} = options;
-
-		// Validate expression early (throws on invalid)
-		new CronParser(expression);
-
-		await this.#initializeOnce();
-
-		this.setHandler(name, handler);
-
-		return await _register(
-			this.#context,
-			{
-				name,
-				expression,
-				payload,
-				enabled,
-				max_attempts,
-				max_attempt_duration_ms,
-				backoff_strategy,
-			},
-			forceNextRunRecalculate
+		return await this.#doRegister(
+			this.#context.projectId,
+			name,
+			expression,
+			handler,
+			options
 		);
 	}
 
@@ -547,11 +793,7 @@ export class Cron {
 	 * Also removes the in-memory handler.
 	 */
 	async unregister(name: string): Promise<void> {
-		await this.#initializeOnce();
-		const { db, tableNames } = this.#context;
-		const { tableCron } = tableNames;
-		await db.query(`DELETE FROM ${tableCron} WHERE name = $1`, [name]);
-		this.#handlers.delete(name);
+		return await this.#doUnregister(this.#context.projectId, name);
 	}
 
 	/**
@@ -560,17 +802,7 @@ export class Cron {
 	 * @returns The updated CronJob row
 	 */
 	async enable(name: string): Promise<CronJob> {
-		await this.#initializeOnce();
-		const { db, tableNames } = this.#context;
-		const { tableCron } = tableNames;
-		const { rows } = await db.query(
-			`UPDATE ${tableCron}
-			SET enabled = TRUE, updated_at = NOW()
-			WHERE name = $1
-			RETURNING *`,
-			[name]
-		);
-		return rows[0] as CronJob;
+		return await this.#doEnable(this.#context.projectId, name);
 	}
 
 	/**
@@ -579,20 +811,10 @@ export class Cron {
 	 * @returns The updated CronJob row
 	 */
 	async disable(name: string): Promise<CronJob> {
-		await this.#initializeOnce();
-		const { db, tableNames } = this.#context;
-		const { tableCron } = tableNames;
-		const { rows } = await db.query(
-			`UPDATE ${tableCron}
-			SET enabled = FALSE, updated_at = NOW()
-			WHERE name = $1
-			RETURNING *`,
-			[name]
-		);
-		return rows[0] as CronJob;
+		return await this.#doDisable(this.#context.projectId, name);
 	}
 
-	// --- Querying ---
+	// --- Querying (project-scoped) ---
 
 	/**
 	 * Finds a cron job by name.
@@ -600,8 +822,7 @@ export class Cron {
 	 * @returns The CronJob row, or `null` if not found
 	 */
 	async find(name: string): Promise<CronJob | null> {
-		await this.#initializeOnce();
-		return await _findByName(this.#context, name);
+		return await this.#doFind(this.#context.projectId, name);
 	}
 
 	/**
@@ -615,18 +836,7 @@ export class Cron {
 			offset?: number;
 		} = {}
 	): Promise<CronJob[]> {
-		await this.#initializeOnce();
-
-		const conditions: string[] = [];
-		if (options.enabled !== undefined) {
-			conditions.push(`enabled = ${options.enabled ? "TRUE" : "FALSE"}`);
-		}
-		if (options.status) {
-			conditions.push(`status = ${pgQuoteValue(options.status)}`);
-		}
-
-		const where = conditions.length ? conditions.join(" AND ") : null;
-		return await _fetchAll(this.#context, where, options);
+		return await this.#doFetchAll(this.#context.projectId, options);
 	}
 
 	/**
@@ -638,10 +848,7 @@ export class Cron {
 		name: string,
 		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
 	): Promise<CronRunLog[]> {
-		await this.#initializeOnce();
-		const job = await _findByName(this.#context, name);
-		if (!job) return [];
-		return await _logRunFetchAll(this.#context, job.id, options);
+		return await this.#doGetRunHistory(this.#context.projectId, name, options);
 	}
 
 	// --- Maintenance ---
@@ -649,12 +856,18 @@ export class Cron {
 	/**
 	 * Resets stuck `running` jobs back to `idle` (crash recovery).
 	 *
-	 * Jobs are considered stale if they have been running for longer than
-	 * `maxAllowedRunDurationMinutes` (default: 5).
+	 * When called on a `Cron` instance: recovers ALL stuck jobs globally.
+	 * When called on a `CronProjectScope`: recovers only that project's jobs.
+	 *
+	 * @param maxAllowedRunDurationMinutes - Threshold in minutes (default: 5)
 	 */
 	async cleanup(maxAllowedRunDurationMinutes: number = 5): Promise<void> {
-		await this.#initializeOnce();
-		return await _markStale(this.#context, maxAllowedRunDurationMinutes);
+		// Global cleanup — recovers all projects
+		return await this.#doCleanup(
+			this.#context.projectId,
+			maxAllowedRunDurationMinutes,
+			false // projectScoped = false → global recovery
+		);
 	}
 
 	/**
@@ -663,30 +876,28 @@ export class Cron {
 	 * @param sinceMinutesAgo - Time window for statistics (default: 60)
 	 */
 	async healthPreview(sinceMinutesAgo: number = 60): Promise<CronHealthPreviewRow[]> {
-		await this.#initializeOnce();
-		return await _healthPreview(this.#context, sinceMinutesAgo);
+		return await this.#doHealthPreview(this.#context.projectId, sinceMinutesAgo);
 	}
 
-	// --- Events ---
+	// --- Events (project-scoped) ---
 
 	/**
 	 * Subscribes to successful completion events for the given job name(s).
 	 *
 	 * @returns Unsubscribe function
-	 *
-	 * @example
-	 * ```typescript
-	 * const unsub = cron.onDone("backup", (job) => {
-	 *   console.log(`Next backup at: ${job.next_run_at}`);
-	 * });
-	 * ```
 	 */
 	onDone(
 		name: string | string[],
 		cb: (job: CronJob) => void,
 		skipIfExists: boolean = true
 	): Unsubscriber {
-		return this.#onEvent(this.#pubsubDone, name, cb, skipIfExists);
+		return this.#doOnEvent(
+			this.#context.projectId,
+			this.#pubsubDone,
+			name,
+			cb,
+			skipIfExists
+		);
 	}
 
 	/**
@@ -699,46 +910,70 @@ export class Cron {
 		cb: (job: CronJob) => void,
 		skipIfExists: boolean = true
 	): Unsubscriber {
-		return this.#onEvent(this.#pubsubError, name, cb, skipIfExists);
-	}
-
-	#onEvent(
-		pubsub: ReturnType<typeof createPubSub>,
-		name: string | string[],
-		cb: (job: CronJob) => void,
-		skipIfExists: boolean
-	): Unsubscriber {
-		const names = Array.isArray(name) ? name : [name];
-		const unsubs: (() => void)[] = [];
-
-		// wrap to prevent unhandled errors from killing the process
-		if (!Cron.#onEventWraps.has(cb)) {
-			Cron.#onEventWraps.set(cb, async (job: CronJob) => {
-				try {
-					await cb(job);
-				} catch (e) {
-					this.#logger?.error?.(`onEvent ${name}: ${e}`);
-				}
-			});
-		}
-		const wrapped = Cron.#onEventWraps.get(cb) as (job: CronJob) => Promise<void>;
-
-		names.forEach((n) => {
-			if (!skipIfExists || !pubsub.isSubscribed(n, wrapped)) {
-				const unsub = pubsub.subscribe(n, wrapped);
-				unsubs.push(() => {
-					unsub();
-					Cron.#onEventWraps.delete(cb);
-				});
-			}
-		});
-		return () => unsubs.forEach((u) => u());
+		return this.#doOnEvent(
+			this.#context.projectId,
+			this.#pubsubError,
+			name,
+			cb,
+			skipIfExists
+		);
 	}
 
 	/** Removes all event listeners. Primarily used in tests. */
 	unsubscribeAll(): void {
 		this.#pubsubDone.unsubscribeAll();
 		this.#pubsubError.unsubscribeAll();
+	}
+
+	// --- Project scoping ---
+
+	/**
+	 * Returns a lightweight project-scoped view sharing this instance's
+	 * processor pool.
+	 *
+	 * The returned object exposes only management methods — lifecycle
+	 * (`start`, `stop`, `resetHard`, `uninstall`) stays on the parent `Cron`.
+	 *
+	 * @example
+	 * ```typescript
+	 * const projA = cron.forProject("project-a");
+	 * await projA.register("report", "0 9 * * *", handler);
+	 * ```
+	 */
+	forProject(projectId: string): CronProjectScope {
+		// deno-lint-ignore no-this-alias
+		const self = this;
+		return {
+			get projectId() {
+				return projectId;
+			},
+			register: (name, expression, handler, options?) =>
+				self.#doRegister(projectId, name, expression, handler, options),
+			unregister: (name) => self.#doUnregister(projectId, name),
+			enable: (name) => self.#doEnable(projectId, name),
+			disable: (name) => self.#doDisable(projectId, name),
+			find: (name) => self.#doFind(projectId, name),
+			fetchAll: (options?) => self.#doFetchAll(projectId, options),
+			getRunHistory: (name, options?) =>
+				self.#doGetRunHistory(projectId, name, options),
+			healthPreview: (sinceMinutesAgo?) =>
+				self.#doHealthPreview(projectId, sinceMinutesAgo),
+			cleanup: (maxMins?) =>
+				self.#doCleanup(projectId, maxMins, true /* projectScoped */),
+			setHandler(name, handler) {
+				self.#doSetHandler(projectId, name, handler);
+				return this;
+			},
+			hasHandler: (name) => self.#doHasHandler(projectId, name),
+			removeHandler(name) {
+				self.#doRemoveHandler(projectId, name);
+				return this;
+			},
+			onDone: (name, cb, skipIfExists?) =>
+				self.#doOnEvent(projectId, self.#pubsubDone, name, cb, skipIfExists ?? true),
+			onError: (name, cb, skipIfExists?) =>
+				self.#doOnEvent(projectId, self.#pubsubError, name, cb, skipIfExists ?? true),
+		};
 	}
 
 	// --- DB health ---
@@ -756,6 +991,41 @@ export class Cron {
 	}
 
 	// --- Static helpers ---
+
+	/**
+	 * Migrates an existing v1 schema to v2 (adds `project_id` column).
+	 *
+	 * Safe to call multiple times — uses `IF NOT EXISTS` / `IF EXISTS`.
+	 */
+	static async migrate(
+		db: pg.Pool | pg.Client,
+		tablePrefix: string = ""
+	): Promise<void> {
+		const { tableCron, tableCronRunLog } = _tableNames(tablePrefix);
+		const safe = (name: string) => `${name}`.replace(/\W/g, "");
+
+		await db.query("BEGIN");
+		await db.query(`
+			ALTER TABLE ${tableCron}
+				ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) NOT NULL DEFAULT '_default';
+
+			DROP INDEX IF EXISTS idx_${safe(tableCron)}_name;
+
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_${safe(tableCron)}_project_name
+				ON ${tableCron}(project_id, name);
+
+			DROP INDEX IF EXISTS idx_${safe(tableCron)}_next_run_at;
+			CREATE INDEX IF NOT EXISTS idx_${safe(tableCron)}_next_run_at
+				ON ${tableCron}(enabled, status, next_run_at);
+
+			ALTER TABLE ${tableCronRunLog}
+				ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) NOT NULL DEFAULT '_default';
+
+			CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_project_id
+				ON ${tableCronRunLog}(project_id);
+		`);
+		await db.query("COMMIT");
+	}
 
 	/** Returns raw SQL strings for schema operations. @internal */
 	static __schema(tablePrefix: string = ""): { drop: string; create: string } {

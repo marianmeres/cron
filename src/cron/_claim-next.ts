@@ -4,8 +4,8 @@ import { CRON_STATUS, type CronContext, type CronJob } from "./cron.ts";
  * Atomically claims the next eligible cron job by marking it as `running`.
  *
  * Uses `FOR UPDATE SKIP LOCKED` so concurrent workers never double-claim.
- * The returned job's `next_run_at` is the scheduled time captured at claim —
- * this value is used downstream for drift-safe `next_run_at` recalculation.
+ * Claims any due job regardless of `project_id` — project scoping is handled
+ * by the management layer, not the processor.
  *
  * @returns The claimed CronJob, or `null` if nothing is due
  */

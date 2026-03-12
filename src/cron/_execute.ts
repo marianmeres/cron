@@ -58,7 +58,7 @@ export async function _executeCronJob(
 				result
 			);
 
-			context.pubsubDone.publish(job.name, completedJob);
+			context.pubsubDone.publish(`${job.project_id}\0${job.name}`, completedJob);
 			return; // done
 
 		} catch (error: unknown) {
@@ -93,5 +93,5 @@ export async function _executeCronJob(
 		isTimeout
 	);
 
-	context.pubsubError.publish(job.name, failedJob);
+	context.pubsubError.publish(`${job.project_id}\0${job.name}`, failedJob);
 }

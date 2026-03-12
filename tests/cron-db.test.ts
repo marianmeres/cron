@@ -8,7 +8,13 @@
  */
 
 import { assertEquals, assert, assertRejects } from "@std/assert";
-import { Cron, CRON_STATUS, RUN_STATUS, type CronJob } from "../src/mod.ts";
+import {
+	Cron,
+	CRON_STATUS,
+	DEFAULT_PROJECT_ID,
+	RUN_STATUS,
+	type CronJob,
+} from "../src/mod.ts";
 import { sleep } from "../src/cron/utils/sleep.ts";
 import { createPg } from "./_pg.ts";
 import type pg from "pg";
@@ -571,6 +577,378 @@ Deno.test("20 graceful-shutdown-waits-for-active-jobs", async () => {
 
 		assert(completed, "job must complete before stop() returns");
 	} finally {
+		await db.end();
+	}
+});
+
+// =========================================================================
+// project_id scoping tests
+// =========================================================================
+
+function createCronWithProject(db: pg.Pool, projectId: string) {
+	return new Cron({
+		db,
+		tablePrefix: TABLE_PREFIX,
+		pollTimeoutMs: POLL,
+		gracefulSigterm: false,
+		logger: noopLogger,
+		projectId,
+	});
+}
+
+Deno.test("21 project_id-defaults-to-_default", async () => {
+	const { db, cron } = await setup();
+	try {
+		const job = await cron.register("greet", "* * * * *", async () => "hi");
+		assertEquals(job.project_id, DEFAULT_PROJECT_ID);
+	} finally {
+		await teardown(cron, db);
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("22 project_id-same-name-different-projects", async () => {
+	const db = createPg();
+	const cronA = createCronWithProject(db, "project-a");
+	await cronA.resetHard();
+
+	const cronB = createCronWithProject(db, "project-b");
+
+	try {
+		const jobA = await cronA.register(
+			"report",
+			"* * * * *",
+			async () => "a"
+		);
+		const jobB = await cronB.register(
+			"report",
+			"0 * * * *",
+			async () => "b"
+		);
+
+		assertEquals(jobA.project_id, "project-a");
+		assertEquals(jobB.project_id, "project-b");
+		assertEquals(jobA.name, jobB.name);
+
+		// Each instance sees only its own job
+		const allA = await cronA.fetchAll();
+		const allB = await cronB.fetchAll();
+		assertEquals(allA.length, 1);
+		assertEquals(allB.length, 1);
+		assertEquals(allA[0].project_id, "project-a");
+		assertEquals(allB[0].project_id, "project-b");
+	} finally {
+		await cronA.stop();
+		await cronB.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("23 project_id-find-is-scoped", async () => {
+	const db = createPg();
+	const cronA = createCronWithProject(db, "project-a");
+	await cronA.resetHard();
+
+	const cronB = createCronWithProject(db, "project-b");
+
+	try {
+		await cronA.register("shared-name", "* * * * *", async () => "a");
+		await cronB.register("shared-name", "* * * * *", async () => "b");
+
+		const foundA = await cronA.find("shared-name");
+		const foundB = await cronB.find("shared-name");
+
+		assert(foundA !== null);
+		assert(foundB !== null);
+		assertEquals(foundA!.project_id, "project-a");
+		assertEquals(foundB!.project_id, "project-b");
+	} finally {
+		await cronA.stop();
+		await cronB.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("24 project_id-unregister-is-scoped", async () => {
+	const db = createPg();
+	const cronA = createCronWithProject(db, "project-a");
+	await cronA.resetHard();
+
+	const cronB = createCronWithProject(db, "project-b");
+
+	try {
+		await cronA.register("job", "* * * * *", async () => "a");
+		await cronB.register("job", "* * * * *", async () => "b");
+
+		await cronA.unregister("job");
+
+		// A's job is gone, B's still exists
+		const foundA = await cronA.find("job");
+		const foundB = await cronB.find("job");
+		assertEquals(foundA, null);
+		assert(foundB !== null);
+	} finally {
+		await cronA.stop();
+		await cronB.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("25 project_id-enable-disable-is-scoped", async () => {
+	const db = createPg();
+	const cronA = createCronWithProject(db, "project-a");
+	await cronA.resetHard();
+
+	const cronB = createCronWithProject(db, "project-b");
+
+	try {
+		await cronA.register("job", "* * * * *", async () => "a");
+		await cronB.register("job", "* * * * *", async () => "b");
+
+		await cronA.disable("job");
+
+		const jobA = await cronA.find("job");
+		const jobB = await cronB.find("job");
+		assertEquals(jobA!.enabled, false);
+		assertEquals(jobB!.enabled, true, "project-b's job must remain enabled");
+	} finally {
+		await cronA.stop();
+		await cronB.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("26 single-start-serves-multiple-projects", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		let calledA = false;
+		let calledB = false;
+		await projA.register("job", "* * * * *", async () => {
+			calledA = true;
+		});
+		await projB.register("job", "* * * * *", async () => {
+			calledB = true;
+		});
+
+		// Backdate both jobs
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
+			 SET next_run_at = NOW() - INTERVAL '1 second'
+			 WHERE name = 'job'`
+		);
+
+		// Single start() processes both projects
+		await cron.start(1);
+		await sleep(400);
+
+		assert(calledA, "project-a handler must have been called");
+		assert(calledB, "project-b handler must have been called");
+	} finally {
+		cron.unsubscribeAll();
+		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("27 forProject-management-is-isolated", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		await projA.register("report", "* * * * *", async () => "a");
+		await projB.register("report", "0 * * * *", async () => "b");
+		await projB.register("extra", "* * * * *", async () => "x");
+
+		// fetchAll is scoped
+		const allA = await projA.fetchAll();
+		const allB = await projB.fetchAll();
+		assertEquals(allA.length, 1);
+		assertEquals(allB.length, 2);
+		assertEquals(allA[0].project_id, "project-a");
+
+		// find is scoped
+		const foundA = await projA.find("report");
+		const foundB = await projB.find("report");
+		assert(foundA !== null);
+		assert(foundB !== null);
+		assertEquals(foundA!.expression, "* * * * *");
+		assertEquals(foundB!.expression, "0 * * * *");
+
+		// unregister is scoped
+		await projA.unregister("report");
+		assertEquals(await projA.find("report"), null);
+		assert((await projB.find("report")) !== null);
+	} finally {
+		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("28 forProject-event-isolation", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		await projA.register("job", "* * * * *", async () => "a");
+		await projB.register("job", "* * * * *", async () => "b");
+
+		let doneA: CronJob | null = null;
+		let doneB: CronJob | null = null;
+		projA.onDone("job", (job) => { doneA = job; });
+		projB.onDone("job", (job) => { doneB = job; });
+
+		// Only backdate project-a
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
+			 SET next_run_at = NOW() - INTERVAL '1 second'
+			 WHERE project_id = 'project-a' AND name = 'job'`
+		);
+
+		await cron.start(1);
+		await sleep(300);
+
+		assert(doneA !== null, "projA onDone must fire");
+		assertEquals((doneA as CronJob).project_id, "project-a");
+		assertEquals(doneB, null, "projB onDone must NOT fire (its job was not due)");
+	} finally {
+		cron.unsubscribeAll();
+		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("29 global-cleanup-recovers-all-projects", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		await projA.register("stuck", "* * * * *", async () => {});
+		await projB.register("stuck", "* * * * *", async () => {});
+
+		// Put both jobs into stale running state
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
+			 SET status = 'running',
+			     last_run_at = NOW() - INTERVAL '10 minutes'
+			 WHERE name = 'stuck'`
+		);
+
+		// Global cleanup on the Cron instance recovers all
+		await cron.cleanup(5);
+
+		const jobA = await projA.find("stuck");
+		const jobB = await projB.find("stuck");
+		assertEquals(jobA!.status, CRON_STATUS.IDLE);
+		assertEquals(jobB!.status, CRON_STATUS.IDLE);
+	} finally {
+		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("30 scoped-cleanup-recovers-only-own-project", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		await projA.register("stuck", "* * * * *", async () => {});
+		await projB.register("stuck", "* * * * *", async () => {});
+
+		// Put both jobs into stale running state
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
+			 SET status = 'running',
+			     last_run_at = NOW() - INTERVAL '10 minutes'
+			 WHERE name = 'stuck'`
+		);
+
+		// Scoped cleanup on projA only recovers project-a
+		await projA.cleanup(5);
+
+		const jobA = await projA.find("stuck");
+		const jobB = await projB.find("stuck");
+		assertEquals(jobA!.status, CRON_STATUS.IDLE, "project-a must be recovered");
+		assertEquals(jobB!.status, "running", "project-b must still be stuck");
+	} finally {
+		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+Deno.test("31 forProject-correct-handler-per-project", async () => {
+	const db = createPg();
+	const cron = createCron(db);
+	await cron.resetHard();
+
+	const projA = cron.forProject("project-a");
+	const projB = cron.forProject("project-b");
+
+	try {
+		let resultA = "";
+		let resultB = "";
+		await projA.register("job", "* * * * *", async () => {
+			resultA = "handler-a";
+		});
+		await projB.register("job", "* * * * *", async () => {
+			resultB = "handler-b";
+		});
+
+		// Only backdate project-a's job
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
+			 SET next_run_at = NOW() - INTERVAL '1 second'
+			 WHERE project_id = 'project-a' AND name = 'job'`
+		);
+
+		await cron.start(1);
+		await sleep(300);
+
+		assertEquals(resultA, "handler-a", "project-a's handler must run");
+		assertEquals(resultB, "", "project-b's handler must NOT run (not due)");
+	} finally {
+		cron.unsubscribeAll();
+		await cron.stop();
 		await db.end();
 	}
 });

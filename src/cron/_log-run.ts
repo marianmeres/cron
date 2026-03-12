@@ -12,10 +12,10 @@ export async function _logRunStart(
 	const { tableCronRunLog } = tableNames;
 
 	const { rows } = await db.query(
-		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, scheduled_at, attempt_number)
-		VALUES ($1, $2, $3, $4)
+		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, project_id, scheduled_at, attempt_number)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
-		[cronId, cronName, scheduledAt, attemptNumber]
+		[cronId, cronName, context.projectId, scheduledAt, attemptNumber]
 	);
 
 	return rows[0].id as number;

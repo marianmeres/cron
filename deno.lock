@@ -2,7 +2,9 @@
   "version": "5",
   "specifiers": {
     "jsr:@marianmeres/clog@^3.15.2": "3.15.2",
+    "jsr:@marianmeres/modelize@^2.0.3": "2.0.3",
     "jsr:@marianmeres/npmbuild@^1.11.0": "1.11.0",
+    "jsr:@marianmeres/pubsub@^2.4.5": "2.4.6",
     "jsr:@marianmeres/pubsub@^2.4.6": "2.4.6",
     "jsr:@std/assert@^1.0.19": "1.0.19",
     "jsr:@std/collections@^1.1.5": "1.1.6",
@@ -11,11 +13,19 @@
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "jsr:@std/path@^1.1.4": "1.1.4",
     "npm:@types/pg@^8.16.0": "8.18.0",
+    "npm:ajv@^8.17.1": "8.18.0",
     "npm:pg@^8.18.0": "8.20.0"
   },
   "jsr": {
     "@marianmeres/clog@3.15.2": {
       "integrity": "c9f35639efed3aacf28d7f1a0c3b0cfb23420a6ece0e830742e56c3e87c48562"
+    },
+    "@marianmeres/modelize@2.0.3": {
+      "integrity": "a1c9620ad9d3d487671c57a6e875df7c1d2cd5defbe6d0919ef8239f1d6ba0ed",
+      "dependencies": [
+        "jsr:@marianmeres/pubsub@^2.4.5",
+        "npm:ajv"
+      ]
     },
     "@marianmeres/npmbuild@1.11.0": {
       "integrity": "924ed6df296aa4e3ffd55ad2c4b7904663824c5c30866c0c47fa815fd2c1a7d8",
@@ -68,6 +78,24 @@
         "pg-protocol",
         "pg-types"
       ]
+    },
+    "ajv@8.18.0": {
+      "integrity": "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A==",
+      "dependencies": [
+        "fast-deep-equal",
+        "fast-uri",
+        "json-schema-traverse",
+        "require-from-string"
+      ]
+    },
+    "fast-deep-equal@3.1.3": {
+      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="
+    },
+    "fast-uri@3.1.0": {
+      "integrity": "sha512-iPeeDKJSWf4IEOasVVrknXpaBV0IApz/gp7S2bb7Z4Lljbl2MGJRqInZiUrQwV16cpzw/D3S5j5Julj/gT52AA=="
+    },
+    "json-schema-traverse@1.0.0": {
+      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug=="
     },
     "pg-cloudflare@1.3.0": {
       "integrity": "sha512-6lswVVSztmHiRtD6I8hw4qP/nDm1EJbKMRhf3HCYaqud7frGysPv7FYJ5noZQdhQtN2xJnimfMtvQq21pdbzyQ=="
@@ -131,6 +159,9 @@
         "xtend"
       ]
     },
+    "require-from-string@2.0.2": {
+      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw=="
+    },
     "split2@4.2.0": {
       "integrity": "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg=="
     },
@@ -144,6 +175,7 @@
   "workspace": {
     "dependencies": [
       "jsr:@marianmeres/clog@^3.15.2",
+      "jsr:@marianmeres/modelize@^2.0.3",
       "jsr:@marianmeres/npmbuild@^1.11.0",
       "jsr:@marianmeres/pubsub@^2.4.6",
       "jsr:@std/assert@^1.0.19",
