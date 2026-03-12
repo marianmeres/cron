@@ -1,3 +1,1 @@
-export function name() {
-	return "it works";
-}
+export * from "./cron/cron.ts";
