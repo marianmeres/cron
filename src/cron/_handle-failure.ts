@@ -56,7 +56,7 @@ export function _backoffMs(
 	attempt: number
 ): number {
 	const whitelist = [BACKOFF_STRATEGY.EXP, BACKOFF_STRATEGY.NONE];
-	const effectiveStrategy = whitelist.includes(strategy as any)
+	const effectiveStrategy = whitelist.includes(strategy as typeof BACKOFF_STRATEGY.EXP)
 		? strategy
 		: BACKOFF_STRATEGY.NONE;
 

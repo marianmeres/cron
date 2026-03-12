@@ -13,6 +13,7 @@ export async function _register(
 	data: {
 		name: string;
 		expression: string;
+		// deno-lint-ignore no-explicit-any
 		payload: Record<string, any>;
 		enabled: boolean;
 		max_attempts: number;

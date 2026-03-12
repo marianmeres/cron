@@ -25,7 +25,7 @@ export async function _logRunStart(
 export async function _logRunSuccess(
 	context: CronContext,
 	runLogId: number,
-	result: any
+	result: unknown
 ): Promise<void> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -52,7 +52,7 @@ export async function _logRunError(
 	context: CronContext,
 	runLogId: number,
 	errMessage: string,
-	errDetails: any,
+	errDetails: { stack: string } | null,
 	status: typeof RUN_STATUS.ERROR | typeof RUN_STATUS.TIMEOUT
 ): Promise<void> {
 	const { db, tableNames } = context;
@@ -88,7 +88,7 @@ export async function _logRunFetchAll(
 	const { tableCronRunLog } = tableNames;
 
 	const parts: string[] = [`SELECT * FROM ${tableCronRunLog} WHERE cron_id = $1`];
-	const params: any[] = [cronId];
+	const params: (number | string | Date)[] = [cronId];
 
 	if (options.sinceMinutesAgo) {
 		params.push(options.sinceMinutesAgo);

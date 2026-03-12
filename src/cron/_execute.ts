@@ -24,7 +24,7 @@ export async function _executeCronJob(
 	// Capture scheduled time before any success/failure handler changes it
 	const scheduledAt = job.next_run_at;
 
-	let lastError: any = null;
+	let _lastError: unknown = null;
 	let isTimeout = false;
 
 	for (let attempt = 1; attempt <= job.max_attempts; attempt++) {
@@ -44,7 +44,7 @@ export async function _executeCronJob(
 					__handler,
 					job.max_attempt_duration_ms,
 					"Execution timed out"
-				) as any;
+				);
 			}
 
 			const result = await __handler();
@@ -61,17 +61,19 @@ export async function _executeCronJob(
 			context.pubsubDone.publish(job.name, completedJob);
 			return; // done
 
-		} catch (error: any) {
-			lastError = error;
+		} catch (error: unknown) {
+			_lastError = error;
 			isTimeout = error instanceof TimeoutError;
 
 			const runStatus = isTimeout ? RUN_STATUS.TIMEOUT : RUN_STATUS.ERROR;
+			const errMsg = error instanceof Error ? error.message : `${error}`;
+			const errStack = error instanceof Error && error.stack ? { stack: error.stack } : null;
 
 			await _logRunError(
 				context,
 				runLogId,
-				error?.message ?? `${error}`,
-				error?.stack ? { stack: error.stack } : null,
+				errMsg,
+				errStack,
 				runStatus
 			);
 

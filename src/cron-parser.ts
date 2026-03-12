@@ -1,11 +1,36 @@
+/**
+ * Parses and evaluates standard 5-field cron expressions.
+ *
+ * Supports wildcards, ranges (1-5), lists (1,3,5),
+ * and step values (e.g. every 5 minutes, or 2-10 with step 3).
+ *
+ * @example
+ * ```typescript
+ * const parser = new CronParser("0 2 * * 1-5");
+ * const next = parser.getNextRun();
+ * console.log(parser.matches(new Date()));
+ * ```
+ */
 export class CronParser {
+	/** The original cron expression string. */
 	readonly expression: string;
+	/** Expanded minute values (0–59). */
 	readonly minute: number[];
+	/** Expanded hour values (0–23). */
 	readonly hour: number[];
+	/** Expanded day-of-month values (1–31). */
 	readonly dayOfMonth: number[];
+	/** Expanded month values (1–12). */
 	readonly month: number[];
+	/** Expanded day-of-week values (0–6, where 0 = Sunday). */
 	readonly dayOfWeek: number[];
 
+	/**
+	 * Creates a new CronParser instance.
+	 *
+	 * @param expression - A standard 5-field cron expression (minute, hour, day-of-month, month, day-of-week)
+	 * @throws If the expression contains invalid characters or does not have exactly 5 fields
+	 */
 	constructor(expression: string) {
 		this.expression = expression;
 
@@ -122,6 +147,11 @@ export class CronParser {
 		return Array.from({ length: end - start + 1 }, (_, i) => start + i);
 	}
 
+	/**
+	 * Tests whether the given date matches this cron expression.
+	 *
+	 * @param date - The date to test against
+	 */
 	matches(date: Date): boolean {
 		return (
 			this.minute.includes(date.getMinutes()) &&
@@ -132,6 +162,12 @@ export class CronParser {
 		);
 	}
 
+	/**
+	 * Calculates the next run time that matches this cron expression.
+	 *
+	 * @param fromDate - Starting point for the search (default: now)
+	 * @throws If no matching time is found within one year
+	 */
 	getNextRun(fromDate: Date = new Date()): Date {
 		const next = new Date(fromDate);
 		next.setSeconds(0, 0);

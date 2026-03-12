@@ -70,19 +70,20 @@ export async function withDbRetry<T>(
 		logger,
 	} = options;
 
-	let lastError: any;
+	let lastError: unknown;
 	let delayMs = initialDelayMs;
 
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		try {
 			return await fn();
-		} catch (error: any) {
+		} catch (error: unknown) {
 			lastError = error;
 
 			// Check if error is retryable
-			const errorCode = error?.code;
+			const errorCode = (error as Record<string, unknown>)?.code as string | undefined;
+			const errorMessage = error instanceof Error ? error.message : String(error);
 			const isRetryable = retryableErrors.some(
-				(code) => errorCode === code || error?.message?.includes(code)
+				(code) => errorCode === code || errorMessage?.includes(code)
 			);
 
 			// Don't retry on last attempt or non-retryable errors
@@ -92,7 +93,7 @@ export async function withDbRetry<T>(
 
 			logger?.warn?.(
 				`DB operation failed (attempt ${attempt + 1}/${maxRetries + 1}): ${
-					errorCode || error?.message
+					errorCode || errorMessage
 				}. Retrying in ${delayMs}ms...`
 			);
 

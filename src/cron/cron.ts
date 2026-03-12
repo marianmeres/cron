@@ -66,6 +66,7 @@ export const BACKOFF_STRATEGY = {
  * The returned value is stored in the run log's `result` field.
  * Throw an error to indicate failure.
  */
+// deno-lint-ignore no-explicit-any
 export type CronHandler = (job: CronJob) => any | Promise<any>;
 
 /**
@@ -94,6 +95,7 @@ export interface CronJob {
 	uid: string;
 	name: string;
 	expression: string;
+	// deno-lint-ignore no-explicit-any
 	payload: Record<string, any>;
 	enabled: boolean;
 	status: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
@@ -128,15 +130,28 @@ export interface CronRunLog {
 		| typeof RUN_STATUS.ERROR
 		| typeof RUN_STATUS.TIMEOUT
 		| null;
+	// deno-lint-ignore no-explicit-any
 	result: Record<string, any> | null;
 	error_message: string | null;
+	// deno-lint-ignore no-explicit-any
 	error_details: Record<string, any> | null;
+}
+
+/**
+ * A single row from the health preview query, representing
+ * execution statistics grouped by run status.
+ */
+export interface CronHealthPreviewRow {
+	status: string;
+	count: number;
+	avg_duration_seconds: number | null;
 }
 
 /**
  * Options for registering a cron job.
  */
 export interface CronRegisterOptions {
+	// deno-lint-ignore no-explicit-any
 	payload?: Record<string, any>;
 	enabled?: boolean;
 	max_attempts?: number;
@@ -342,10 +357,10 @@ export class Cron {
 					}
 					this.#claimErrorCounter = 0;
 				}
-			} catch (e: any) {
+			} catch (e: unknown) {
 				this.#claimErrorCounter++;
 				if (this.#claimErrorCounter < limit) {
-					this.#logger?.error?.(`Cron claim: ${e?.stack ?? e}`);
+					this.#logger?.error?.(`Cron claim: ${e instanceof Error ? e.stack ?? e.message : e}`);
 				} else if (this.#claimErrorCounter === limit) {
 					this.#logger?.debug?.(`Cron claim error reporting MUTED...`);
 				}
@@ -647,7 +662,7 @@ export class Cron {
 	 *
 	 * @param sinceMinutesAgo - Time window for statistics (default: 60)
 	 */
-	async healthPreview(sinceMinutesAgo: number = 60): Promise<any[]> {
+	async healthPreview(sinceMinutesAgo: number = 60): Promise<CronHealthPreviewRow[]> {
 		await this.#initializeOnce();
 		return await _healthPreview(this.#context, sinceMinutesAgo);
 	}
@@ -694,7 +709,7 @@ export class Cron {
 		skipIfExists: boolean
 	): Unsubscriber {
 		const names = Array.isArray(name) ? name : [name];
-		const unsubs: any[] = [];
+		const unsubs: (() => void)[] = [];
 
 		// wrap to prevent unhandled errors from killing the process
 		if (!Cron.#onEventWraps.has(cb)) {
@@ -706,7 +721,7 @@ export class Cron {
 				}
 			});
 		}
-		const wrapped = Cron.#onEventWraps.get(cb) as any;
+		const wrapped = Cron.#onEventWraps.get(cb) as (job: CronJob) => Promise<void>;
 
 		names.forEach((n) => {
 			if (!skipIfExists || !pubsub.isSubscribed(n, wrapped)) {

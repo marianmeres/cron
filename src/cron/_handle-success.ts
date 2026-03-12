@@ -18,7 +18,7 @@ export async function _handleCronSuccess(
 	job: CronJob,
 	scheduledAt: Date,
 	runLogId: number,
-	result: any
+	result: unknown
 ): Promise<CronJob> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;

@@ -8,9 +8,11 @@
  */
 
 import { assertEquals, assert, assertRejects } from "@std/assert";
-import { Cron, CRON_STATUS, RUN_STATUS } from "../src/mod.ts";
+import { Cron, CRON_STATUS, RUN_STATUS, type CronJob } from "../src/mod.ts";
 import { sleep } from "../src/cron/utils/sleep.ts";
 import { createPg } from "./_pg.ts";
+import type pg from "pg";
+import type { Logger } from "@marianmeres/clog";
 
 // ---- test helpers -------------------------------------------------------
 
@@ -24,9 +26,9 @@ const noopLogger = {
 	log: () => {},
 	warn: () => {},
 	error: () => {},
-} as any;
+} as Logger;
 
-function createCron(db: any) {
+function createCron(db: pg.Pool) {
 	return new Cron({
 		db,
 		tablePrefix: TABLE_PREFIX,
@@ -37,7 +39,7 @@ function createCron(db: any) {
 }
 
 /** Helper: force a job's next_run_at into the past so the poller picks it up */
-async function backdateNextRun(db: any, name: string, msAgo = 100) {
+async function backdateNextRun(db: pg.Pool, name: string, msAgo = 100) {
 	await db.query(
 		`UPDATE ${TABLE_PREFIX}__cron
 		 SET next_run_at = NOW() - ($1 * INTERVAL '1 millisecond')
@@ -47,7 +49,7 @@ async function backdateNextRun(db: any, name: string, msAgo = 100) {
 }
 
 /** Helper: fetch fresh row from DB */
-async function fetchJob(db: any, name: string) {
+async function fetchJob(db: pg.Pool, name: string) {
 	const { rows } = await db.query(
 		`SELECT * FROM ${TABLE_PREFIX}__cron WHERE name = $1`,
 		[name]
@@ -64,7 +66,7 @@ async function setup() {
 	return { db, cron };
 }
 
-async function teardown(cron: Cron, db: any) {
+async function teardown(cron: Cron, db: pg.Pool) {
 	cron.unsubscribeAll();
 	await cron.stop();
 	await db.end();
@@ -388,7 +390,7 @@ Deno.test("13 onDone-fires-on-success", async () => {
 	try {
 		await cron.register("notify", "* * * * *", async () => ({ result: 42 }));
 
-		let doneJob: any = null;
+		let doneJob: CronJob | null = null;
 		cron.onDone("notify", (job) => {
 			doneJob = job;
 		});
@@ -398,8 +400,8 @@ Deno.test("13 onDone-fires-on-success", async () => {
 		await sleep(300);
 
 		assert(doneJob !== null, "onDone callback must fire");
-		assertEquals(doneJob.last_run_status, RUN_STATUS.SUCCESS);
-		assertEquals(doneJob.name, "notify");
+		assertEquals((doneJob as CronJob).last_run_status, RUN_STATUS.SUCCESS);
+		assertEquals((doneJob as CronJob).name, "notify");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -414,7 +416,7 @@ Deno.test("14 onError-fires-on-failure", async () => {
 			throw new Error("intentional");
 		});
 
-		let errorJob: any = null;
+		let errorJob: CronJob | null = null;
 		cron.onError("broken", (job) => {
 			errorJob = job;
 		});
@@ -424,7 +426,7 @@ Deno.test("14 onError-fires-on-failure", async () => {
 		await sleep(300);
 
 		assert(errorJob !== null, "onError callback must fire");
-		assertEquals(errorJob.last_run_status, RUN_STATUS.ERROR);
+		assertEquals((errorJob as CronJob).last_run_status, RUN_STATUS.ERROR);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -521,7 +523,7 @@ Deno.test("18 healthPreview-returns-stats", async () => {
 
 		const successRow = preview.find((r) => r.status === RUN_STATUS.SUCCESS);
 		assert(successRow !== undefined, "must have a success stats row");
-		assert(parseInt(successRow.count) >= 1, "count must be at least 1");
+		assert(parseInt(`${successRow!.count}`) >= 1, "count must be at least 1");
 	} finally {
 		await teardown(cron, db);
 	}

@@ -30,6 +30,7 @@ export function sleep(
 		__timeout_ref__.id = setTimeout(() => {
 			clearTimeout(__timeout_ref__.id);
 			resolve(undefined);
+		// deno-lint-ignore no-explicit-any
 		}, timeout) as any;
 	});
 }

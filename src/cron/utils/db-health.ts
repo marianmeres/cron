@@ -62,14 +62,15 @@ export async function checkDbHealth(
 			timestamp,
 			pgVersion: result.rows[0]?.version?.split(" ")[1], // Extract version number
 		};
-	} catch (error: any) {
+	} catch (error: unknown) {
 		const latencyMs = Date.now() - start;
-		logger?.error?.(`DB health check failed: ${error?.message}`);
+		const errMsg = error instanceof Error ? error.message : String(error);
+		logger?.error?.(`DB health check failed: ${errMsg}`);
 
 		return {
 			healthy: false,
 			latencyMs,
-			error: error?.message || String(error),
+			error: errMsg,
 			timestamp,
 		};
 	}
@@ -98,7 +99,7 @@ export class DbHealthMonitor {
 	#db: pg.Pool | pg.Client;
 	#logger?: Logger;
 	#intervalMs: number;
-	#timeoutId: any = null;
+	#timeoutId: ReturnType<typeof setTimeout> | null = null;
 	#isRunning = false;
 	#lastStatus: DbHealthStatus | null = null;
 	#onUnhealthy?: (status: DbHealthStatus) => void;

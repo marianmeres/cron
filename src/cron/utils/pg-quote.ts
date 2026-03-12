@@ -4,7 +4,7 @@ export function pgQuoteIdentifier(key: string): string {
 }
 
 /** Will quote value for pg dialect */
-export function pgQuoteValue(value: any): string {
+export function pgQuoteValue(value: unknown): string {
 	if (value === null || /^null$/i.test(`${value}`)) return "null";
 	return `'${`${value}`.replaceAll("'", "''")}'`;
 }
