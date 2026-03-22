@@ -1,0 +1,1 @@
+PostgreSQL-backed cron job scheduler for Deno/Node with drift-safe scheduling, atomic job claiming (FOR UPDATE SKIP LOCKED), retry with backoff, project-scoped job management, and an in-memory task registry with JSON Schema validation.
