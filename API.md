@@ -18,6 +18,7 @@ const cron = new Cron(options: CronOptions);
 | `logger` | `Logger` | `clog("cron")` | Logger instance |
 | `dbRetry` | `DbRetryOptions \| boolean` | — | Enable retry on transient DB errors |
 | `dbHealthCheck` | `boolean \| object` | — | Enable DB health monitoring |
+| `autoCleanup` | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | — | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`) |
 
 #### Project scoping
 
@@ -50,9 +51,11 @@ Initialises the schema (idempotent) and starts N polling workers. Processors are
 await cron.start(2); // 2 concurrent workers (default)
 ```
 
-#### `cron.stop(): Promise<void>`
+#### `cron.stop(options?: { drainTimeoutMs?: number }): Promise<void>`
 
-Gracefully stops all workers. Waits for any currently executing jobs to complete.
+Gracefully stops all workers. Aborts the per-execution `AbortSignal` so handlers that honour it can cancel their work.
+
+`drainTimeoutMs` (default: **30 000 ms**) caps how long `stop()` waits for in-flight handlers to drain. Pass `0` to wait forever (legacy behaviour). When the cap is exceeded, in-flight job IDs are logged at error level and `stop()` returns; the orphaned executions continue in the background but cannot claim new work.
 
 #### `cron.resetHard(): Promise<void>`
 
@@ -72,7 +75,7 @@ Registers (or updates) a cron job. On first call creates the DB row; on subseque
 
 The job is scoped to the instance's `projectId`. The unique constraint is `(project_id, name)`.
 
-Throws if `expression` is not a valid 5-field cron expression.
+Throws if `expression` is not a valid 5-field cron expression — including impossible date combinations like `0 0 31 2 *` (Feb 31).
 
 **Parameters:**
 - `name` (string) — Job identifier (unique within the project)
@@ -88,18 +91,22 @@ Throws if `expression` is not a valid 5-field cron expression.
 | `enabled` | `boolean` | `true` | Whether job participates in polling |
 | `max_attempts` | `number` | `1` | Max retries within one execution cycle |
 | `max_attempt_duration_ms` | `number` | `0` | Timeout per attempt (0 = disabled) |
-| `backoff_strategy` | `"none" \| "exp"` | `"none"` | Delay between retries |
+| `backoff_strategy` | `"none" \| "exp"` | `"none"` | Delay between retries (exp is clamped, see below) |
+| `timezone` | `string \| null` | `null` | IANA timezone for the cron expression (e.g. `"Europe/Prague"`); `null` means host local time |
 | `forceNextRunRecalculate` | `boolean` | `false` | Recalculate `next_run_at` on upsert |
 
+> **Backoff:** `"exp"` strategy doubles the delay each attempt (`2^n s`) and is clamped at **5 minutes**. Legacy unbounded growth is gone.
+
 ```typescript
-const job = await cron.register("backup", "0 2 * * *", async (job) => {
-  await runBackup(job.payload.bucket);
+const job = await cron.register("backup", "0 2 * * *", async (job, signal) => {
+  await runBackup(job.payload.bucket, { signal });
   return { files: 42 };
 }, {
   payload: { bucket: "my-bucket" },
   max_attempts: 3,
   max_attempt_duration_ms: 60_000,
   backoff_strategy: "exp",
+  timezone: "Europe/Prague",
 });
 ```
 
@@ -122,6 +129,10 @@ Removes all registered in-memory handlers.
 #### `cron.hasHandler(name): boolean`
 
 Returns `true` if an in-memory handler is registered.
+
+#### `cron.listHandlerNames(): string[]`
+
+Returns the job names of all in-memory handlers in the current project.
 
 ---
 
@@ -164,13 +175,24 @@ Returns the execution log for a job, newest first.
 
 ### Maintenance
 
-#### `cron.cleanup(maxAllowedRunDurationMinutes?: number): Promise<void>`
+#### `cron.cleanup(maxAllowedRunDurationMinutes?: number): Promise<number>`
 
-Resets stuck `running` jobs back to `idle` (crash recovery). Default threshold: 5 minutes.
+Resets stuck `running` jobs back to `idle` (crash recovery). Default threshold: 5 minutes. Returns the number of rows recovered.
+
+When recovering a stuck row, the row's `lease_token` is cleared. If the original (still-alive) worker later writes a result, its `WHERE id = $ AND lease_token = $` predicate fails — preventing it from clobbering whatever fresh execution has happened in the meantime.
 
 **Global vs scoped cleanup:**
 - Called on `Cron` instance: recovers **all** stuck jobs globally (no `project_id` filter).
 - Called on `CronProjectScope` (via `forProject()`): recovers only that project's stuck jobs.
+
+#### `cron.pruneRunLog(olderThanMinutes: number): Promise<number>`
+
+Deletes run-log rows older than the threshold. Returns the number of rows deleted. Same global / scoped split as `cleanup()`.
+
+```typescript
+// Keep 30 days of history
+await cron.pruneRunLog(60 * 24 * 30);
+```
 
 #### `cron.healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>`
 
@@ -231,9 +253,11 @@ const jobs = await projA.fetchAll();
 | `fetchAll` | `(options?) => Promise<CronJob[]>` | |
 | `getRunHistory` | `(name, options?) => Promise<CronRunLog[]>` | |
 | `healthPreview` | `(sinceMinutesAgo?) => Promise<CronHealthPreviewRow[]>` | |
-| `cleanup` | `(maxMins?) => Promise<void>` | Project-scoped (only this project's stuck jobs) |
+| `cleanup` | `(maxMins?) => Promise<number>` | Project-scoped (only this project's stuck jobs) |
+| `pruneRunLog` | `(olderThanMinutes) => Promise<number>` | Project-scoped |
 | `setHandler` | `(name, handler) => CronProjectScope` | Chainable |
 | `hasHandler` | `(name) => boolean` | |
+| `listHandlerNames` | `() => string[]` | |
 | `removeHandler` | `(name) => CronProjectScope` | Chainable |
 | `onDone` | `(name, cb, skipIfExists?) => Unsubscriber` | |
 | `onError` | `(name, cb, skipIfExists?) => Unsubscriber` | |
@@ -258,7 +282,9 @@ Runs a one-off DB health check.
 
 #### `Cron.migrate(db, tablePrefix?): Promise<void>`
 
-Migrates an existing v1 schema to v2 by adding the `project_id` column, dropping the old single-column `name` unique index, creating the composite `(project_id, name)` unique index, and updating the polling index to `(enabled, status, next_run_at)` (global, no `project_id`). Safe to call multiple times (uses `IF NOT EXISTS` / `IF EXISTS`).
+Idempotent schema migration. Brings any prior schema (v1 with no `project_id`, or v2 without `lease_token` / `timezone` / CHECK constraints) up to current. Safe to call multiple times.
+
+The migration runs in a real transaction (single connection — works against `pg.Pool`).
 
 ```typescript
 await Cron.migrate(db);
@@ -349,25 +375,36 @@ const bad = await registry.validate("send-report", {});
 
 ---
 
-## `syncRegistryToCron(cron, registry): Promise<SyncRegistryResult>`
+## `syncRegistryToCron(cron, registry, options?): Promise<SyncRegistryResult>`
 
-Wires task registry handlers to a `Cron` instance and detects orphan jobs.
+Wires task registry handlers to a `Cron` instance and reconciles state.
 
-For each registered task type, calls `cron.setHandler(taskType, handler)`. Then fetches all DB jobs for the project and reports which ones have no matching registry entry.
+For each registered task type, calls `cron.setHandler(taskType, handler)`. Then:
+- Removes any in-memory handlers that no longer appear in the registry (`removedHandlers`).
+- Scans DB jobs in pages and reports those with no matching registry entry (`orphans`).
 
-Does **not** auto-create DB rows — use `cron.register()` separately to create job instances with specific schedules.
+DB scan uses `pageSize: 500` by default; override via the third argument.
+
+Does **not** auto-create or auto-delete DB rows — use `cron.register()` /
+`cron.unregister()` separately to manage job instances.
 
 ```typescript
 import { syncRegistryToCron } from "@marianmeres/cron";
 
-const { synced, orphans } = await syncRegistryToCron(cron, registry);
+const { synced, orphans, removedHandlers } = await syncRegistryToCron(
+  cron,
+  registry,
+  { pageSize: 1000 }
+);
 console.log("Handlers wired:", synced);
 console.log("Jobs without handlers:", orphans);
+console.log("Stale handlers removed:", removedHandlers);
 ```
 
 **Returns:** `SyncRegistryResult`
 - `synced` (string[]) — Task types whose handlers were wired
 - `orphans` (string[]) — Job names in DB with no matching registry entry
+- `removedHandlers` (string[]) — In-memory handlers removed because they no longer appear in the registry
 
 ---
 
@@ -382,12 +419,14 @@ interface CronJob {
   project_id: string;
   name: string;
   expression: string;
+  timezone: string | null;             // IANA tz, null = host local time
   payload: Record<string, any>;
   enabled: boolean;
   status: "idle" | "running";
   next_run_at: Date;
   last_run_at: Date | null;
   last_run_status: "success" | "error" | "timeout" | null;
+  lease_token: string | null;          // per-claim fence (UUID)
   max_attempts: number;
   max_attempt_duration_ms: number;
   backoff_strategy: "none" | "exp";
@@ -440,16 +479,18 @@ interface CronProjectScope {
   fetchAll(options?): Promise<CronJob[]>;
   getRunHistory(name, options?): Promise<CronRunLog[]>;
   healthPreview(sinceMinutesAgo?): Promise<CronHealthPreviewRow[]>;
-  cleanup(maxAllowedRunDurationMinutes?): Promise<void>;
+  cleanup(maxAllowedRunDurationMinutes?): Promise<number>;
+  pruneRunLog(olderThanMinutes): Promise<number>;
   setHandler(name, handler): CronProjectScope;
   hasHandler(name): boolean;
+  listHandlerNames(): string[];
   removeHandler(name): CronProjectScope;
   onDone(name, cb, skipIfExists?): Unsubscriber;
   onError(name, cb, skipIfExists?): Unsubscriber;
 }
 ```
 
-A lightweight project-scoped view returned by `cron.forProject()`. Shares the parent's processor pool. Has all management methods but no lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`). The `cleanup()` method on a scope is project-scoped (only recovers that project's stuck jobs), unlike the global `cron.cleanup()`.
+A lightweight project-scoped view returned by `cron.forProject()`. Shares the parent's processor pool. Has all management methods but no lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`). The `cleanup()` and `pruneRunLog()` methods on a scope are project-scoped (only that project's rows), unlike the global `cron.cleanup()` / `cron.pruneRunLog()`.
 
 ### `TaskDefinition`
 
@@ -488,6 +529,7 @@ interface TaskValidationResult {
 interface SyncRegistryResult {
   synced: string[];
   orphans: string[];
+  removedHandlers: string[];
 }
 ```
 
@@ -496,10 +538,23 @@ interface SyncRegistryResult {
 ### `CronHandler`
 
 ```typescript
-type CronHandler = (job: CronJob) => any | Promise<any>;
+type CronHandler = (job: CronJob, signal?: AbortSignal) => any | Promise<any>;
 ```
 
 The return value is stored in `CronRunLog.result`. Throw to indicate failure.
+
+The optional `signal` is `abort()`-ed when the per-attempt timeout fires **or** when the Cron instance is shutting down. Pass it through to anything cancellable (e.g. `fetch`, child processes) for real cooperative cancellation.
+
+---
+
+### `CronStopOptions`
+
+```typescript
+interface CronStopOptions {
+  /** Hard cap (ms) on draining in-flight jobs. Default: 30_000. Pass 0 to wait forever. */
+  drainTimeoutMs?: number;
+}
+```
 
 ---
 
@@ -529,7 +584,7 @@ The return value is stored in `CronRunLog.result`. Throw to indicate failure.
 | Key | Value | Description |
 |-----|-------|-------------|
 | `NONE` | `"none"` | No delay between retries |
-| `EXP` | `"exp"` | Exponential backoff: `2^attempt` seconds |
+| `EXP` | `"exp"` | Exponential backoff `2^attempt` seconds, **clamped at 5 min** |
 
 ---
 
@@ -545,16 +600,25 @@ const next = parser.getNextRun(new Date());
 console.log(next); // Date: next 15-minute boundary
 
 parser.matches(new Date()); // boolean — true if expression matches this date
+
+// Timezone-aware
+const tzed = new CronParser("0 9 * * 1-5", { timezone: "Europe/Prague" });
 ```
 
-#### `new CronParser(expression: string)`
+#### `new CronParser(expression: string, options?: { timezone?: string })`
 
-Throws if `expression` is not a valid 5-field cron expression.
+Throws if `expression` is not a valid 5-field cron expression, or if it describes a calendar combination that can never occur (e.g. `0 0 31 2 *`).
+
+`timezone` is an optional IANA timezone name used to evaluate the expression. When omitted, the host's local timezone is used. DST transitions are handled correctly — spring-forward gaps skip non-existent minutes, fall-back overlaps fire only once.
 
 #### `parser.matches(date: Date): boolean`
 
 Returns `true` if the expression matches the given date.
 
+**Day-of-month + day-of-week semantics:** when both fields are restricted (i.e. neither is `*`), they are **OR**-ed (POSIX/Vixie cron). When only one is restricted, only that one matters.
+
 #### `parser.getNextRun(from?: Date): Date`
 
 Returns the next scheduled time after `from` (default: `new Date()`).
+
+Throws if no matching time is found within ~8 years (defensive cap; covers leap-day expressions and rare DoM+DoW combinations).

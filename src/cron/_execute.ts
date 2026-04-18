@@ -15,11 +15,16 @@ import { sleep } from "./utils/sleep.ts";
  *
  * Note: `job.next_run_at` at the time this is called IS the `scheduledAt` — the
  * claim UPDATE does not modify `next_run_at`, so it still holds the intended schedule.
+ *
+ * `leaseToken` is the value written to `lease_token` at claim time. Success /
+ * failure handlers use it as a fence against stale-recovered re-claims.
  */
 export async function _executeCronJob(
 	context: CronContext,
 	job: CronJob,
-	handler: CronHandler
+	handler: CronHandler,
+	leaseToken: string | null,
+	shutdownSignal?: AbortSignal
 ): Promise<void> {
 	// Capture scheduled time before any success/failure handler changes it
 	const scheduledAt = job.next_run_at;
@@ -36,14 +41,21 @@ export async function _executeCronJob(
 			attempt
 		);
 
+		// Per-attempt abort controller. Triggered on timeout OR shutdown.
+		const attemptCtrl = new AbortController();
+		const onShutdown = () => attemptCtrl.abort(new Error("Cron is shutting down"));
+		shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
+
 		try {
-			let __handler = () => handler(job);
+			// Pass abort signal as second handler argument — handlers can opt in.
+			let __handler = () => handler(job, attemptCtrl.signal);
 
 			if (job.max_attempt_duration_ms > 0) {
 				__handler = withTimeout(
 					__handler,
 					job.max_attempt_duration_ms,
-					"Execution timed out"
+					"Execution timed out",
+					attemptCtrl
 				);
 			}
 
@@ -55,7 +67,8 @@ export async function _executeCronJob(
 				job,
 				scheduledAt,
 				runLogId,
-				result
+				result,
+				leaseToken
 			);
 
 			context.pubsubDone.publish(`${job.project_id}\0${job.name}`, completedJob);
@@ -80,8 +93,10 @@ export async function _executeCronJob(
 			// Apply backoff before next attempt (if any remain)
 			if (attempt < job.max_attempts) {
 				const delay = _backoffMs(job.backoff_strategy, attempt);
-				if (delay > 0) await sleep(delay);
+				if (delay > 0) await sleep(delay, undefined, shutdownSignal);
 			}
+		} finally {
+			shutdownSignal?.removeEventListener("abort", onShutdown);
 		}
 	}
 
@@ -90,7 +105,8 @@ export async function _executeCronJob(
 		context,
 		job,
 		scheduledAt,
-		isTimeout
+		isTimeout,
+		leaseToken
 	);
 
 	context.pubsubError.publish(`${job.project_id}\0${job.name}`, failedJob);

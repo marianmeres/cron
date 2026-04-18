@@ -1,4 +1,5 @@
-import { CRON_STATUS, type CronContext } from "./cron.ts";
+import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
+import { withTx } from "./utils/with-tx.ts";
 
 export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
 	const { tableCron, tableCronRunLog } = context.tableNames;
@@ -14,6 +15,13 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 	// so we can work with "schema." prefix in naming things...
 	const safe = (name: string) => `${name}`.replace(/\W/g, "");
 
+	const okCronStatuses = [CRON_STATUS.IDLE, CRON_STATUS.RUNNING]
+		.map((v) => `'${v}'`)
+		.join(", ");
+	const okRunStatuses = [RUN_STATUS.SUCCESS, RUN_STATUS.ERROR, RUN_STATUS.TIMEOUT]
+		.map((v) => `'${v}'`)
+		.join(", ");
+
 	// prettier-ignore
 	return `
 		CREATE TABLE IF NOT EXISTS ${tableCron} (
@@ -22,14 +30,20 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 			project_id              VARCHAR(255) NOT NULL DEFAULT '_default',
 			name                    VARCHAR(255) NOT NULL,
 			expression              VARCHAR(100) NOT NULL,
+			timezone                VARCHAR(64),
 			payload                 JSONB NOT NULL DEFAULT '{}',
 			enabled                 BOOLEAN NOT NULL DEFAULT TRUE,
-			status                  VARCHAR(20) NOT NULL DEFAULT '${CRON_STATUS.IDLE}',
+			status                  VARCHAR(20) NOT NULL DEFAULT '${CRON_STATUS.IDLE}'
+				CHECK (status IN (${okCronStatuses})),
 			next_run_at             TIMESTAMPTZ NOT NULL,
 			last_run_at             TIMESTAMPTZ,
-			last_run_status         VARCHAR(20),
-			max_attempts            INTEGER NOT NULL DEFAULT 1,
-			max_attempt_duration_ms INTEGER NOT NULL DEFAULT 0,
+			last_run_status         VARCHAR(20)
+				CHECK (last_run_status IS NULL OR last_run_status IN (${okRunStatuses})),
+			lease_token             UUID,
+			max_attempts            INTEGER NOT NULL DEFAULT 1
+				CHECK (max_attempts >= 1),
+			max_attempt_duration_ms INTEGER NOT NULL DEFAULT 0
+				CHECK (max_attempt_duration_ms >= 0),
 			backoff_strategy        VARCHAR(20) NOT NULL DEFAULT 'none',
 			created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -50,8 +64,10 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 			scheduled_at    TIMESTAMPTZ NOT NULL,
 			started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			completed_at    TIMESTAMPTZ,
-			attempt_number  INTEGER NOT NULL DEFAULT 1,
-			status          VARCHAR(20),
+			attempt_number  INTEGER NOT NULL DEFAULT 1
+				CHECK (attempt_number >= 1),
+			status          VARCHAR(20)
+				CHECK (status IS NULL OR status IN (${okRunStatuses})),
 			result          JSONB,
 			error_message   TEXT,
 			error_details   JSONB,
@@ -74,20 +90,17 @@ export async function _initialize(
 	context: CronContext,
 	hard = false
 ): Promise<void> {
-	const { db } = context;
-
 	const sql = [hard && _schemaDrop(context), _schemaCreate(context)]
 		.filter(Boolean)
 		.join("\n");
 
-	await db.query("BEGIN");
-	await db.query(sql);
-	await db.query("COMMIT");
+	await withTx(context.db, async (client) => {
+		await client.query(sql);
+	});
 }
 
 export async function _uninstall(context: CronContext): Promise<void> {
-	const { db } = context;
-	await db.query("BEGIN");
-	await db.query(_schemaDrop(context));
-	await db.query("COMMIT");
+	await withTx(context.db, async (client) => {
+		await client.query(_schemaDrop(context));
+	});
 }

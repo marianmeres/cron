@@ -4,7 +4,12 @@
 [![JSR](https://jsr.io/badges/@marianmeres/cron)](https://jsr.io/@marianmeres/cron)
 [![License](https://img.shields.io/npm/l/@marianmeres/cron)](LICENSE)
 
-PostgreSQL-backed recurring cron job scheduler. Supports concurrent workers via `FOR UPDATE SKIP LOCKED`, drift-safe scheduling, retries, timeouts, per-job run history, project-scoped isolation, and an optional task registry for UI-driven job management.
+PostgreSQL-backed recurring cron job scheduler. Concurrent workers via
+`FOR UPDATE SKIP LOCKED`, drift-safe scheduling, real transactions on `pg.Pool`,
+per-claim lease tokens (so stale-recovered jobs cannot clobber fresh
+results), retries with capped exponential backoff, per-attempt timeouts with
+`AbortSignal` cancellation, IANA timezone-aware schedules, project-scoped
+isolation, and an optional task registry for UI-driven job management.
 
 ## Installation
 
@@ -43,8 +48,8 @@ cron.onError("daily-report", (job) => {
   console.error(`Report failed: ${job.last_run_status}`);
 });
 
-// Graceful shutdown
-process.on("SIGTERM", () => cron.stop());
+// Graceful shutdown (returns within drainTimeoutMs even if a handler hangs)
+process.on("SIGTERM", () => cron.stop({ drainTimeoutMs: 30_000 }));
 ```
 
 ### Project scoping
@@ -77,30 +82,72 @@ const jobsB = await projB.fetchAll(); // only project-b jobs
 When `projectId` is omitted (i.e. `new Cron({ db })`), it defaults to `"_default"` —
 single-project usage works exactly as before.
 
-### Retries and timeouts
+### Retries, timeouts, and cancellation
 
 ```typescript
 await cron.register(
   "flaky-api",
   "*/5 * * * *",
-  async () => callExternalApi(),
+  async (job, signal) => {
+    // The signal aborts on per-attempt timeout AND on cron.stop().
+    // Pass it through to anything cancellable (fetch, child processes, etc.).
+    return await fetch(url, { signal });
+  },
   {
     max_attempts: 3,                // retry up to 3 times per cycle
     max_attempt_duration_ms: 10000, // kill after 10s
-    backoff_strategy: "exp",        // exponential backoff between retries
+    backoff_strategy: "exp",        // exponential backoff (clamped at 5 min)
   }
+);
+```
+
+### Timezones
+
+Cron expressions are evaluated in the host's local timezone by default. Pass an
+IANA timezone per job to evaluate in that zone — handles DST transitions
+correctly (spring-forward gaps are skipped, fall-back overlaps fire once):
+
+```typescript
+await cron.register(
+  "europe-morning-report",
+  "0 9 * * 1-5",
+  handler,
+  { timezone: "Europe/Prague" }
 );
 ```
 
 ### Concurrent workers (multiple processes)
 
-Multiple `Cron` instances sharing the same PostgreSQL database safely co-exist — `FOR UPDATE SKIP LOCKED` ensures each job executes exactly once across all workers.
+Multiple `Cron` instances sharing the same PostgreSQL database safely co-exist —
+`FOR UPDATE SKIP LOCKED` ensures each job claim is exclusive. Per-claim
+**lease tokens** additionally guarantee that a stale-recovered worker (one
+whose process froze long enough to be reset by `cleanup()`) cannot
+overwrite a fresh execution's result.
 
 ```typescript
 // In each process / dyno:
-const cron = new Cron({ db });
+const cron = new Cron({ db, autoCleanup: true });
 await cron.register("job", "* * * * *", handler);
 await cron.start(1);
+```
+
+### Maintenance
+
+Stuck `running` jobs (process crashes mid-execution) are recovered by
+`cleanup()`. Wire it up in one of two ways:
+
+```typescript
+// Option A — built-in timer (recommended)
+const cron = new Cron({
+  db,
+  autoCleanup: { intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 },
+});
+
+// Option B — call manually
+setInterval(() => cron.cleanup(5), 60_000);
+
+// Run-log retention (the run log grows fast for tight schedules):
+setInterval(() => cron.pruneRunLog(60 * 24 * 30), 60 * 60 * 1000); // keep 30 days
 ```
 
 ### Task registry
@@ -143,32 +190,28 @@ registry.define("cleanup-uploads", {
 
 // 2. List available task types (for API/UI — handlers are omitted)
 const tasks = registry.list();
-// [{ taskType: "send-report", description: "...", paramsSchema: {...} },
-//  { taskType: "cleanup-uploads", description: "..." }]
 
 // 3. Validate user-provided payload before creating a job
 const result = await registry.validate("send-report", {
   recipients: ["alice@example.com"],
   format: "pdf",
 });
-// { valid: true, errors: [] }
 
-// 4. Wire handlers to a project scope — this is where the registry
-//    connects with project_id scoping. The same registry can be synced
-//    to multiple project scopes independently.
+// 4. Wire handlers to a project scope. Returns:
+//    - synced: handlers wired
+//    - orphans: DB jobs with no matching registry entry
+//    - removedHandlers: in-memory handlers no longer in the registry (auto-removed)
 const cron = new Cron({ db });
 const myProject = cron.forProject("my-project");
-const { synced, orphans } = await syncRegistryToCron(myProject, registry);
-// synced: ["send-report", "cleanup-uploads"]
-// orphans: jobs in DB with no matching registry entry
+const { synced, orphans, removedHandlers } = await syncRegistryToCron(myProject, registry);
 
 await cron.start(2);
 ```
 
-`syncRegistryToCron` accepts both a `Cron` instance and a `CronProjectScope` (returned
-by `forProject()`). When passed a project scope, the registry's handlers are bound to
-that specific project — so the same task type definitions can serve multiple projects,
-each with its own schedules and payloads, while sharing one processor pool.
+`syncRegistryToCron` accepts both a `Cron` instance and a `CronProjectScope`. When
+passed a project scope, the registry's handlers are bound to that specific project —
+so the same task type definitions can serve multiple projects, each with its own
+schedules and payloads, while sharing one processor pool.
 
 > **Note:** Schema validation requires `@marianmeres/modelize` as a dependency
 > (uses AJV internally). Install it alongside this package if you use `paramsSchema`.
@@ -177,18 +220,26 @@ each with its own schedules and payloads, while sharing one processor pool.
 
 Standard 5-field notation: `minute hour day-of-month month day-of-week`
 
+Supports wildcards (`*`), ranges (`1-5`), lists (`1,3,5`), and step values
+(`*/15`, `2-10/3`). Day-of-month and day-of-week follow POSIX/Vixie cron
+semantics: when both are restricted (neither is `*`), they are **OR**-ed.
+
 ```
 "* * * * *"        — every minute
 "0 2 * * *"        — daily at 02:00
 "*/15 * * * *"     — every 15 minutes
 "0 9 * * 1-5"      — weekdays at 09:00
 "0 0 1 * *"        — first day of each month
+"0 9 15 * 1-5"     — 9am on the 15th OR any weekday at 9am
 ```
 
-### Migrating from v1
+Impossible date combinations (e.g. `0 0 31 2 *` — Feb 31) are rejected at parse time.
 
-If upgrading an existing database (v1 had no `project_id` column), run the migration
-helper once:
+### Migrating from earlier versions
+
+`Cron.migrate()` is idempotent and brings any prior schema (v1 with no
+`project_id`, or v2 without `lease_token` / `timezone` / CHECK constraints)
+up to current:
 
 ```typescript
 await Cron.migrate(db);
@@ -196,10 +247,25 @@ await Cron.migrate(db);
 await Cron.migrate(db, "myschema.");
 ```
 
-This adds the `project_id` column, drops the old single-column `name` unique index,
-creates the composite `(project_id, name)` unique index, and updates the polling index
-to `(enabled, status, next_run_at)` (no longer project-scoped, since processors are
-now global). Safe to call multiple times.
+It adds missing columns (`project_id`, `lease_token`, `timezone`), adjusts
+indexes, and adds CHECK constraints. Safe to call multiple times.
+
+## Breaking changes vs 1.x
+
+- **`CronJob.lease_token` and `CronJob.timezone` columns added.** Existing
+  rows are backfilled to `NULL`; run `Cron.migrate(db)` once on upgrade.
+- **`stop()` now defaults to a 30 s drain cap.** Previously it waited
+  forever. Pass `stop({ drainTimeoutMs: 0 })` to restore the old
+  behaviour.
+- **DoM/DoW expressions where both are restricted now match either
+  field** (POSIX semantics), instead of requiring both. If you were
+  relying on the previous AND behaviour you need to rephrase the
+  expression.
+- **Impossible date combinations** (e.g. `0 0 31 2 *`) now throw at
+  parse time.
+- **`cleanup()` and `pruneRunLog()` return `number`** (rows affected)
+  instead of `void`.
+- **`syncRegistryToCron` result type** gained `removedHandlers: string[]`.
 
 ## API
 

@@ -205,3 +205,126 @@ Deno.test("expression is stored", () => {
 	const c = new CronParser("*/5 9-17 * * 1-5");
 	assertEquals(c.expression, "*/5 9-17 * * 1-5");
 });
+
+// ---------------------------------------------------------------------------
+// Day-of-month + day-of-week OR semantics (POSIX/Vixie cron)
+// ---------------------------------------------------------------------------
+
+Deno.test("DoM + DoW: OR semantics when both are restricted", () => {
+	// "9am on the 15th, OR on any weekday"
+	const c = new CronParser("0 9 15 * 1-5");
+
+	// 2025-06-15 is Sunday (NOT a weekday) — only matches because day == 15
+	assertEquals(c.matches(new Date("2025-06-15T09:00:00")), true);
+	// 2025-06-16 is Monday (NOT the 15th) — only matches because of weekday
+	assertEquals(c.matches(new Date("2025-06-16T09:00:00")), true);
+	// 2025-06-21 is Saturday and not the 15th — must NOT match
+	assertEquals(c.matches(new Date("2025-06-21T09:00:00")), false);
+});
+
+Deno.test("DoM + DoW: only DoM restricts when DoW is *", () => {
+	const c = new CronParser("0 0 25 12 *");
+	assertEquals(c.matches(new Date("2025-12-25T00:00:00")), true);
+	assertEquals(c.matches(new Date("2025-12-26T00:00:00")), false);
+});
+
+Deno.test("DoM + DoW: only DoW restricts when DoM is *", () => {
+	const c = new CronParser("0 9 * * 1-5");
+	// 2025-06-16 is Monday
+	assertEquals(c.matches(new Date("2025-06-16T09:00:00")), true);
+	// 2025-06-15 is Sunday
+	assertEquals(c.matches(new Date("2025-06-15T09:00:00")), false);
+});
+
+Deno.test("DoM + DoW: getNextRun honours OR semantics", () => {
+	// "9am on the 15th OR on Mondays"
+	const c = new CronParser("0 9 15 * 1");
+	// From 2025-06-09 (Monday) at 10am → next match is 2025-06-15 (Sunday) at 9am
+	const next = c.getNextRun(new Date("2025-06-09T10:00:00"));
+	assertEquals(next.getDate(), 15);
+	assertEquals(next.getHours(), 9);
+});
+
+// ---------------------------------------------------------------------------
+// Impossible date detection
+// ---------------------------------------------------------------------------
+
+Deno.test("rejects calendar dates that cannot exist", () => {
+	assertThrows(
+		() => new CronParser("0 0 31 2 *"),
+		Error,
+		"does not exist",
+	);
+	assertThrows(
+		() => new CronParser("0 0 31 4 *"),
+		Error,
+		"does not exist",
+	);
+	assertThrows(
+		() => new CronParser("0 0 30 2 *"),
+		Error,
+		"does not exist",
+	);
+});
+
+Deno.test("does NOT reject when DoW could rescue an impossible DoM", () => {
+	// "midnight on the 31st of Feb on a Monday" — impossible by DoM, but
+	// OR with DoW means "any Monday in Feb" rescues it.
+	const c = new CronParser("0 0 31 2 1");
+	assertEquals(c.dayOfMonth, [31]);
+	// And it can find a next run (any Monday in February)
+	const next = c.getNextRun(new Date("2025-01-01T00:00:00"));
+	// Should land on a Monday in February
+	assertEquals(next.getDay(), 1);
+	assertEquals(next.getMonth(), 1); // February
+});
+
+Deno.test("Feb 29 leap day: getNextRun finds next leap year", () => {
+	// 2025 is not a leap year; from March 2025 → next Feb 29 = 2028-02-29
+	const c = new CronParser("0 0 29 2 *");
+	const next = c.getNextRun(new Date("2025-03-01T00:00:00"));
+	assertEquals(next.getFullYear(), 2028);
+	assertEquals(next.getMonth(), 1); // February
+	assertEquals(next.getDate(), 29);
+});
+
+// ---------------------------------------------------------------------------
+// Timezone support
+// ---------------------------------------------------------------------------
+
+Deno.test("rejects invalid timezone", () => {
+	assertThrows(
+		() => new CronParser("* * * * *", { timezone: "Not/A_Real_Zone" }),
+		Error,
+		"Invalid timezone",
+	);
+});
+
+Deno.test("timezone: matches in target timezone, not local", () => {
+	// 9am in Tokyo on 2025-06-15 = 00:00 UTC = 02:00 in Prague (CEST)
+	const c = new CronParser("0 9 * * *", { timezone: "Asia/Tokyo" });
+
+	const utcMidnight = new Date(Date.UTC(2025, 5, 15, 0, 0, 0));
+	assertEquals(c.matches(utcMidnight), true); // 9am Tokyo
+
+	// Same UTC date, hour off by one
+	const oneHourLater = new Date(Date.UTC(2025, 5, 15, 1, 0, 0));
+	assertEquals(c.matches(oneHourLater), false);
+});
+
+Deno.test("timezone: getNextRun computes against TZ wall clock", () => {
+	// "9am UTC daily" — easy to assert deterministically
+	const c = new CronParser("0 9 * * *", { timezone: "UTC" });
+	const from = new Date(Date.UTC(2025, 5, 15, 8, 0, 0));
+	const next = c.getNextRun(from);
+	assertEquals(next.getUTCFullYear(), 2025);
+	assertEquals(next.getUTCMonth(), 5);
+	assertEquals(next.getUTCDate(), 15);
+	assertEquals(next.getUTCHours(), 9);
+	assertEquals(next.getUTCMinutes(), 0);
+});
+
+Deno.test("timezone is stored", () => {
+	const c = new CronParser("* * * * *", { timezone: "Europe/Prague" });
+	assertEquals(c.timezone, "Europe/Prague");
+});

@@ -1,6 +1,8 @@
 /**
  * Delays execution for `timeout` milliseconds.
  *
+ * Resolves early (without throwing) if the optional `signal` is aborted.
+ *
  * @example
  * ```ts
  * await sleep(100);
@@ -14,6 +16,14 @@
  * // ...
  * clearTimeout(ref.id)
  * ```
+ *
+ * @example
+ * ```ts
+ * // Abortable sleep
+ * const ctrl = new AbortController();
+ * setTimeout(() => ctrl.abort(), 50);
+ * await sleep(10_000, undefined, ctrl.signal); // returns after ~50ms
+ * ```
  */
 export function sleep(
 	timeout: number,
@@ -24,13 +34,24 @@ export function sleep(
 	 *
 	 * If calling directly `await sleep(x)` in a top level flow, this dance is not needed.
 	 */
-	__timeout_ref__: { id: number } = { id: -1 }
+	__timeout_ref__: { id: number } = { id: -1 },
+	signal?: AbortSignal
 ): Promise<void> {
+	if (signal?.aborted) return Promise.resolve();
+
 	return new Promise((resolve) => {
+		const onAbort = () => {
+			clearTimeout(__timeout_ref__.id);
+			resolve(undefined);
+		};
+
 		__timeout_ref__.id = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
 			clearTimeout(__timeout_ref__.id);
 			resolve(undefined);
 		// deno-lint-ignore no-explicit-any
 		}, timeout) as any;
+
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
