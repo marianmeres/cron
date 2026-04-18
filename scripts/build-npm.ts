@@ -15,6 +15,6 @@ await npmBuild({
 			"pg",
 			"@types/pg",
 		],
-		"../deno.json",
+		denoJson,
 	),
 });
