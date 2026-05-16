@@ -1,53 +1,49 @@
 {
   "version": "5",
   "specifiers": {
-    "jsr:@marianmeres/batch@^1.2.0": "1.2.0",
-    "jsr:@marianmeres/clog@^3.15.3": "3.17.0",
-    "jsr:@marianmeres/clog@^3.17.0": "3.17.0",
-    "jsr:@marianmeres/modelize@^2.2.0": "2.2.0",
-    "jsr:@marianmeres/npmbuild@^1.13.0": "1.13.0",
+    "jsr:@marianmeres/batch@^1.2.5": "1.2.5",
+    "jsr:@marianmeres/clog@^3.19.1": "3.19.2",
+    "jsr:@marianmeres/clog@^3.19.2": "3.19.2",
+    "jsr:@marianmeres/modelize@^2.2.2": "2.2.2",
+    "jsr:@marianmeres/npmbuild@^1.14.0": "1.14.0",
     "jsr:@marianmeres/pubsub@3": "3.0.0",
-    "jsr:@marianmeres/pubsub@^2.4.6": "2.4.6",
     "jsr:@std/assert@^1.0.19": "1.0.19",
-    "jsr:@std/collections@^1.1.6": "1.1.6",
+    "jsr:@std/collections@^1.1.6": "1.1.7",
     "jsr:@std/fs@^1.0.23": "1.0.23",
-    "jsr:@std/internal@^1.0.12": "1.0.12",
+    "jsr:@std/internal@^1.0.12": "1.0.13",
     "jsr:@std/path@^1.1.4": "1.1.4",
     "npm:@types/pg@^8.20.0": "8.20.0",
-    "npm:ajv@^8.18.0": "8.18.0",
+    "npm:ajv@^8.20.0": "8.20.0",
     "npm:pg@^8.20.0": "8.20.0"
   },
   "jsr": {
-    "@marianmeres/batch@1.2.0": {
-      "integrity": "7cafd9be55f1f0a1a9f7aaab205c7d2804d1a904bbcc33528e2fda74020d5ceb",
+    "@marianmeres/batch@1.2.5": {
+      "integrity": "f30d2f508b9ea52169759e841cfdd18c66bedea9ec3a3813022a5f5958af95e0",
       "dependencies": [
-        "jsr:@marianmeres/clog@^3.15.3",
-        "jsr:@marianmeres/pubsub@^2.4.6"
+        "jsr:@marianmeres/clog@^3.19.1",
+        "jsr:@marianmeres/pubsub"
       ]
     },
-    "@marianmeres/clog@3.17.0": {
-      "integrity": "c8cc70dd07e7de851fc41f92563ddc4e55c10c34bc3b42351df5ed14908ac8cd",
+    "@marianmeres/clog@3.19.2": {
+      "integrity": "683f72cbf5b6bd25f22dcbb2e7e61a0c1a08286c5278ab4ba5d8c48885358deb",
       "dependencies": [
         "jsr:@marianmeres/batch"
       ]
     },
-    "@marianmeres/modelize@2.2.0": {
-      "integrity": "8bf7d496689b8d0892b9665ea4ccd265ae9a8b3009a8cb43b4ee2977cef31632",
+    "@marianmeres/modelize@2.2.2": {
+      "integrity": "bd1b1133acd470ec8785e6ef8965e93cda04db5788a19c7aa0591784b60194ab",
       "dependencies": [
-        "jsr:@marianmeres/pubsub@3",
+        "jsr:@marianmeres/pubsub",
         "npm:ajv"
       ]
     },
-    "@marianmeres/npmbuild@1.13.0": {
-      "integrity": "6283bc3fce312cf8a15fb1b979bc7e974fb99849ae0b449aa5a4837e4e7bb635",
+    "@marianmeres/npmbuild@1.14.0": {
+      "integrity": "2101b17e423cfa9a26bbfe251c5c40641b36d5a06500f3d6ac7f6dc8c2579a7d",
       "dependencies": [
         "jsr:@std/collections",
         "jsr:@std/fs",
         "jsr:@std/path"
       ]
-    },
-    "@marianmeres/pubsub@2.4.6": {
-      "integrity": "949fc1f5e39a84642f5943dccb94fe14c58bfffa48649e8401f3d0607a7f2159"
     },
     "@marianmeres/pubsub@3.0.0": {
       "integrity": "9bc40e60362801663fb23e0c00a353abec7684840b6bea410facba09c083677b"
@@ -58,8 +54,8 @@
         "jsr:@std/internal"
       ]
     },
-    "@std/collections@1.1.6": {
-      "integrity": "b458160ce65ea5ad35da05d0a5cbee4b583677c8b443a10d7beb0c4ac63f2baa"
+    "@std/collections@1.1.7": {
+      "integrity": "56f659d011218a69740b12829cf5ea2c9b70bbed0af02597e27dc1eb5e69e208"
     },
     "@std/fs@1.0.23": {
       "integrity": "3ecbae4ce4fee03b180fa710caff36bb5adb66631c46a6460aaad49515565a37",
@@ -68,8 +64,8 @@
         "jsr:@std/path"
       ]
     },
-    "@std/internal@1.0.12": {
-      "integrity": "972a634fd5bc34b242024402972cd5143eac68d8dffaca5eaa4dba30ce17b027"
+    "@std/internal@1.0.13": {
+      "integrity": "2f9546691d4ac2d32859c82dff284aaeac980ddeca38430d07941e7e288725c0"
     },
     "@std/path@1.1.4": {
       "integrity": "1d2d43f39efb1b42f0b1882a25486647cb851481862dc7313390b2bb044314b5",
@@ -93,8 +89,8 @@
         "pg-types"
       ]
     },
-    "ajv@8.18.0": {
-      "integrity": "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A==",
+    "ajv@8.20.0": {
+      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
       "dependencies": [
         "fast-deep-equal",
         "fast-uri",
@@ -105,8 +101,8 @@
     "fast-deep-equal@3.1.3": {
       "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="
     },
-    "fast-uri@3.1.0": {
-      "integrity": "sha512-iPeeDKJSWf4IEOasVVrknXpaBV0IApz/gp7S2bb7Z4Lljbl2MGJRqInZiUrQwV16cpzw/D3S5j5Julj/gT52AA=="
+    "fast-uri@3.1.2": {
+      "integrity": "sha512-rVjf7ArG3LTk+FS6Yw81V1DLuZl1bRbNrev6Tmd/9RaroeeRRJhAt7jg/6YFxbvAQXUCavSoZhPPj6oOx+5KjQ=="
     },
     "json-schema-traverse@1.0.0": {
       "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug=="
@@ -188,9 +184,9 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@marianmeres/clog@^3.17.0",
-      "jsr:@marianmeres/modelize@^2.2.0",
-      "jsr:@marianmeres/npmbuild@^1.13.0",
+      "jsr:@marianmeres/clog@^3.19.2",
+      "jsr:@marianmeres/modelize@^2.2.2",
+      "jsr:@marianmeres/npmbuild@^1.14.0",
       "jsr:@marianmeres/pubsub@3",
       "jsr:@std/assert@^1.0.19",
       "jsr:@std/fs@^1.0.23",
