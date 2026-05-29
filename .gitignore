@@ -3,4 +3,6 @@ node_modules/
 .DS_Store
 .npm-dist
 tmp/*
-
+.env
+.env.*
+!.env.example
