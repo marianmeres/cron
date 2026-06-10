@@ -12,19 +12,19 @@ import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
  * predicate fails and the write is silently dropped — preventing it from
  * clobbering whatever fresh execution has happened in the meantime.
  *
- * @param projectScoped - When true, only recovers jobs for `context.projectId`.
- *   When false (default), recovers all stuck jobs regardless of project.
+ * @param tenantScoped - When true, only recovers jobs for `context.tenantId`.
+ *   When false (default), recovers all stuck jobs regardless of tenant.
  * @returns The number of rows recovered
  */
 export async function _markStale(
 	context: CronContext,
 	maxAllowedRunDurationMinutes: number = 5,
-	projectScoped: boolean = false
+	tenantScoped: boolean = false
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	if (projectScoped) {
+	if (tenantScoped) {
 		const result = await db.query(
 			`UPDATE ${tableCron}
 			SET status          = $1,
@@ -33,13 +33,13 @@ export async function _markStale(
 				updated_at      = NOW(),
 				lease_token     = NULL
 			WHERE status = $3
-			  AND project_id = $4
+			  AND tenant_id = $4
 			  AND last_run_at < NOW() - ($5 * INTERVAL '1 minute')`,
 			[
 				CRON_STATUS.IDLE,
 				RUN_STATUS.ERROR,
 				CRON_STATUS.RUNNING,
-				context.projectId,
+				context.tenantId,
 				maxAllowedRunDurationMinutes,
 			]
 		);

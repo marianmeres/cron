@@ -9,7 +9,9 @@ export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
 	`;
 }
 
-export function _schemaCreate(context: Pick<CronContext, "tableNames">): string {
+export function _schemaCreate(
+	context: Pick<CronContext, "tableNames">,
+): string {
 	const { tableCron, tableCronRunLog } = context.tableNames;
 
 	// so we can work with "schema." prefix in naming things...
@@ -18,7 +20,11 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 	const okCronStatuses = [CRON_STATUS.IDLE, CRON_STATUS.RUNNING]
 		.map((v) => `'${v}'`)
 		.join(", ");
-	const okRunStatuses = [RUN_STATUS.SUCCESS, RUN_STATUS.ERROR, RUN_STATUS.TIMEOUT]
+	const okRunStatuses = [
+		RUN_STATUS.SUCCESS,
+		RUN_STATUS.ERROR,
+		RUN_STATUS.TIMEOUT,
+	]
 		.map((v) => `'${v}'`)
 		.join(", ");
 
@@ -27,7 +33,7 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 		CREATE TABLE IF NOT EXISTS ${tableCron} (
 			id                      SERIAL PRIMARY KEY,
 			uid                     UUID NOT NULL DEFAULT gen_random_uuid(),
-			project_id              VARCHAR(255) NOT NULL DEFAULT '_default',
+			tenant_id               VARCHAR(255) NOT NULL DEFAULT '_default',
 			name                    VARCHAR(255) NOT NULL,
 			expression              VARCHAR(100) NOT NULL,
 			timezone                VARCHAR(64),
@@ -49,8 +55,8 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 			updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_${safe(tableCron)}_project_name
-			ON ${tableCron}(project_id, name);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_${safe(tableCron)}_tenant_name
+			ON ${tableCron}(tenant_id, name);
 
 		CREATE INDEX IF NOT EXISTS idx_${safe(tableCron)}_next_run_at
 			ON ${tableCron}(enabled, status, next_run_at);
@@ -60,7 +66,7 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 			id              SERIAL PRIMARY KEY,
 			cron_id         INTEGER NOT NULL,
 			cron_name       VARCHAR(255) NOT NULL,
-			project_id      VARCHAR(255) NOT NULL DEFAULT '_default',
+			tenant_id      VARCHAR(255) NOT NULL DEFAULT '_default',
 			scheduled_at    TIMESTAMPTZ NOT NULL,
 			started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			completed_at    TIMESTAMPTZ,
@@ -81,14 +87,14 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 		CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_started_at
 			ON ${tableCronRunLog}(started_at DESC);
 
-		CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_project_id
-			ON ${tableCronRunLog}(project_id);
+		CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_tenant_id
+			ON ${tableCronRunLog}(tenant_id);
 	`;
 }
 
 export async function _initialize(
 	context: CronContext,
-	hard = false
+	hard = false,
 ): Promise<void> {
 	const sql = [hard && _schemaDrop(context), _schemaCreate(context)]
 		.filter(Boolean)

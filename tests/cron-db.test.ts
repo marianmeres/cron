@@ -11,7 +11,7 @@ import { assertEquals, assert, assertRejects } from "@std/assert";
 import {
 	Cron,
 	CRON_STATUS,
-	DEFAULT_PROJECT_ID,
+	DEFAULT_TENANT_ID,
 	RUN_STATUS,
 	type CronJob,
 } from "../src/mod.ts";
@@ -582,25 +582,25 @@ Deno.test("20 graceful-shutdown-waits-for-active-jobs", async () => {
 });
 
 // =========================================================================
-// project_id scoping tests
+// tenant_id scoping tests
 // =========================================================================
 
-function createCronWithProject(db: pg.Pool, projectId: string) {
+function createCronWithTenant(db: pg.Pool, tenantId: string) {
 	return new Cron({
 		db,
 		tablePrefix: TABLE_PREFIX,
 		pollTimeoutMs: POLL,
 		gracefulSigterm: false,
 		logger: noopLogger,
-		projectId,
+		tenantId,
 	});
 }
 
-Deno.test("21 project_id-defaults-to-_default", async () => {
+Deno.test("21 tenant_id-defaults-to-_default", async () => {
 	const { db, cron } = await setup();
 	try {
 		const job = await cron.register("greet", "* * * * *", async () => "hi");
-		assertEquals(job.project_id, DEFAULT_PROJECT_ID);
+		assertEquals(job.tenant_id, DEFAULT_TENANT_ID);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -608,12 +608,12 @@ Deno.test("21 project_id-defaults-to-_default", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("22 project_id-same-name-different-projects", async () => {
+Deno.test("22 tenant_id-same-name-different-tenants", async () => {
 	const db = createPg();
-	const cronA = createCronWithProject(db, "project-a");
+	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
 
-	const cronB = createCronWithProject(db, "project-b");
+	const cronB = createCronWithTenant(db, "tenant-b");
 
 	try {
 		const jobA = await cronA.register(
@@ -627,8 +627,8 @@ Deno.test("22 project_id-same-name-different-projects", async () => {
 			async () => "b"
 		);
 
-		assertEquals(jobA.project_id, "project-a");
-		assertEquals(jobB.project_id, "project-b");
+		assertEquals(jobA.tenant_id, "tenant-a");
+		assertEquals(jobB.tenant_id, "tenant-b");
 		assertEquals(jobA.name, jobB.name);
 
 		// Each instance sees only its own job
@@ -636,8 +636,8 @@ Deno.test("22 project_id-same-name-different-projects", async () => {
 		const allB = await cronB.fetchAll();
 		assertEquals(allA.length, 1);
 		assertEquals(allB.length, 1);
-		assertEquals(allA[0].project_id, "project-a");
-		assertEquals(allB[0].project_id, "project-b");
+		assertEquals(allA[0].tenant_id, "tenant-a");
+		assertEquals(allB[0].tenant_id, "tenant-b");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -647,12 +647,12 @@ Deno.test("22 project_id-same-name-different-projects", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("23 project_id-find-is-scoped", async () => {
+Deno.test("23 tenant_id-find-is-scoped", async () => {
 	const db = createPg();
-	const cronA = createCronWithProject(db, "project-a");
+	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
 
-	const cronB = createCronWithProject(db, "project-b");
+	const cronB = createCronWithTenant(db, "tenant-b");
 
 	try {
 		await cronA.register("shared-name", "* * * * *", async () => "a");
@@ -663,8 +663,8 @@ Deno.test("23 project_id-find-is-scoped", async () => {
 
 		assert(foundA !== null);
 		assert(foundB !== null);
-		assertEquals(foundA!.project_id, "project-a");
-		assertEquals(foundB!.project_id, "project-b");
+		assertEquals(foundA!.tenant_id, "tenant-a");
+		assertEquals(foundB!.tenant_id, "tenant-b");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -674,12 +674,12 @@ Deno.test("23 project_id-find-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("24 project_id-unregister-is-scoped", async () => {
+Deno.test("24 tenant_id-unregister-is-scoped", async () => {
 	const db = createPg();
-	const cronA = createCronWithProject(db, "project-a");
+	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
 
-	const cronB = createCronWithProject(db, "project-b");
+	const cronB = createCronWithTenant(db, "tenant-b");
 
 	try {
 		await cronA.register("job", "* * * * *", async () => "a");
@@ -701,12 +701,12 @@ Deno.test("24 project_id-unregister-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("25 project_id-enable-disable-is-scoped", async () => {
+Deno.test("25 tenant_id-enable-disable-is-scoped", async () => {
 	const db = createPg();
-	const cronA = createCronWithProject(db, "project-a");
+	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
 
-	const cronB = createCronWithProject(db, "project-b");
+	const cronB = createCronWithTenant(db, "tenant-b");
 
 	try {
 		await cronA.register("job", "* * * * *", async () => "a");
@@ -717,7 +717,7 @@ Deno.test("25 project_id-enable-disable-is-scoped", async () => {
 		const jobA = await cronA.find("job");
 		const jobB = await cronB.find("job");
 		assertEquals(jobA!.enabled, false);
-		assertEquals(jobB!.enabled, true, "project-b's job must remain enabled");
+		assertEquals(jobB!.enabled, true, "tenant-b's job must remain enabled");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -727,13 +727,13 @@ Deno.test("25 project_id-enable-disable-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("26 single-start-serves-multiple-projects", async () => {
+Deno.test("26 single-start-serves-multiple-tenants", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		let calledA = false;
@@ -752,12 +752,12 @@ Deno.test("26 single-start-serves-multiple-projects", async () => {
 			 WHERE name = 'job'`
 		);
 
-		// Single start() processes both projects
+		// Single start() processes both tenants
 		await cron.start(1);
 		await sleep(400);
 
-		assert(calledA, "project-a handler must have been called");
-		assert(calledB, "project-b handler must have been called");
+		assert(calledA, "tenant-a handler must have been called");
+		assert(calledB, "tenant-b handler must have been called");
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
@@ -767,13 +767,13 @@ Deno.test("26 single-start-serves-multiple-projects", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("27 forProject-management-is-isolated", async () => {
+Deno.test("27 forTenant-management-is-isolated", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		await projA.register("report", "* * * * *", async () => "a");
@@ -785,7 +785,7 @@ Deno.test("27 forProject-management-is-isolated", async () => {
 		const allB = await projB.fetchAll();
 		assertEquals(allA.length, 1);
 		assertEquals(allB.length, 2);
-		assertEquals(allA[0].project_id, "project-a");
+		assertEquals(allA[0].tenant_id, "tenant-a");
 
 		// find is scoped
 		const foundA = await projA.find("report");
@@ -807,13 +807,13 @@ Deno.test("27 forProject-management-is-isolated", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("28 forProject-event-isolation", async () => {
+Deno.test("28 forTenant-event-isolation", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		await projA.register("job", "* * * * *", async () => "a");
@@ -824,18 +824,18 @@ Deno.test("28 forProject-event-isolation", async () => {
 		projA.onDone("job", (job) => { doneA = job; });
 		projB.onDone("job", (job) => { doneB = job; });
 
-		// Only backdate project-a
+		// Only backdate tenant-a
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET next_run_at = NOW() - INTERVAL '1 second'
-			 WHERE project_id = 'project-a' AND name = 'job'`
+			 WHERE tenant_id = 'tenant-a' AND name = 'job'`
 		);
 
 		await cron.start(1);
 		await sleep(300);
 
 		assert(doneA !== null, "projA onDone must fire");
-		assertEquals((doneA as CronJob).project_id, "project-a");
+		assertEquals((doneA as CronJob).tenant_id, "tenant-a");
 		assertEquals(doneB, null, "projB onDone must NOT fire (its job was not due)");
 	} finally {
 		cron.unsubscribeAll();
@@ -846,13 +846,13 @@ Deno.test("28 forProject-event-isolation", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("29 global-cleanup-recovers-all-projects", async () => {
+Deno.test("29 global-cleanup-recovers-all-tenants", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		await projA.register("stuck", "* * * * *", async () => {});
@@ -881,13 +881,13 @@ Deno.test("29 global-cleanup-recovers-all-projects", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("30 scoped-cleanup-recovers-only-own-project", async () => {
+Deno.test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		await projA.register("stuck", "* * * * *", async () => {});
@@ -901,13 +901,13 @@ Deno.test("30 scoped-cleanup-recovers-only-own-project", async () => {
 			 WHERE name = 'stuck'`
 		);
 
-		// Scoped cleanup on projA only recovers project-a
+		// Scoped cleanup on projA only recovers tenant-a
 		await projA.cleanup(5);
 
 		const jobA = await projA.find("stuck");
 		const jobB = await projB.find("stuck");
-		assertEquals(jobA!.status, CRON_STATUS.IDLE, "project-a must be recovered");
-		assertEquals(jobB!.status, "running", "project-b must still be stuck");
+		assertEquals(jobA!.status, CRON_STATUS.IDLE, "tenant-a must be recovered");
+		assertEquals(jobB!.status, "running", "tenant-b must still be stuck");
 	} finally {
 		await cron.stop();
 		await db.end();
@@ -916,13 +916,13 @@ Deno.test("30 scoped-cleanup-recovers-only-own-project", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("31 forProject-correct-handler-per-project", async () => {
+Deno.test("31 forTenant-correct-handler-per-tenant", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
 
-	const projA = cron.forProject("project-a");
-	const projB = cron.forProject("project-b");
+	const projA = cron.forTenant("tenant-a");
+	const projB = cron.forTenant("tenant-b");
 
 	try {
 		let resultA = "";
@@ -934,21 +934,202 @@ Deno.test("31 forProject-correct-handler-per-project", async () => {
 			resultB = "handler-b";
 		});
 
-		// Only backdate project-a's job
+		// Only backdate tenant-a's job
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET next_run_at = NOW() - INTERVAL '1 second'
-			 WHERE project_id = 'project-a' AND name = 'job'`
+			 WHERE tenant_id = 'tenant-a' AND name = 'job'`
 		);
 
 		await cron.start(1);
 		await sleep(300);
 
-		assertEquals(resultA, "handler-a", "project-a's handler must run");
-		assertEquals(resultB, "", "project-b's handler must NOT run (not due)");
+		assertEquals(resultA, "handler-a", "tenant-a's handler must run");
+		assertEquals(resultB, "", "tenant-b's handler must NOT run (not due)");
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+// Legacy migration: pre-2.x schemas used a `project_id` column. `Cron.migrate()`
+// must rename it (and its indexes) to `tenant_id` in place, preserving data,
+// and be idempotent.
+Deno.test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
+	const db = createPg();
+	const cron = `${TABLE_PREFIX}__cron`;
+	const runLog = `${TABLE_PREFIX}__cron_run_log`;
+	const safe = (n: string) => n.replace(/\W/g, "");
+	const sc = safe(cron);
+	const sr = safe(runLog);
+
+	const cols = async (table: string): Promise<string[]> => {
+		const { rows } = await db.query(
+			`SELECT column_name FROM information_schema.columns
+			 WHERE table_name = $1 AND table_schema = 'public'`,
+			[table]
+		);
+		return rows.map((r) => r.column_name as string);
+	};
+	const idxs = async (table: string): Promise<string[]> => {
+		const { rows } = await db.query(
+			`SELECT indexname FROM pg_indexes WHERE tablename = $1 AND schemaname = 'public'`,
+			[table]
+		);
+		return rows.map((r) => r.indexname as string);
+	};
+
+	try {
+		// Build a legacy-shaped schema with `project_id` + old index names.
+		await db.query(`
+			DROP TABLE IF EXISTS ${runLog};
+			DROP TABLE IF EXISTS ${cron};
+			CREATE TABLE ${cron} (
+				id SERIAL PRIMARY KEY,
+				uid UUID NOT NULL DEFAULT gen_random_uuid(),
+				project_id VARCHAR(255) NOT NULL DEFAULT '_default',
+				name VARCHAR(255) NOT NULL,
+				expression VARCHAR(100) NOT NULL,
+				timezone VARCHAR(64),
+				payload JSONB NOT NULL DEFAULT '{}',
+				enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				status VARCHAR(20) NOT NULL DEFAULT 'idle',
+				next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_run_at TIMESTAMPTZ,
+				last_run_status VARCHAR(20),
+				lease_token UUID,
+				max_attempts INTEGER NOT NULL DEFAULT 1,
+				max_attempt_duration_ms INTEGER NOT NULL DEFAULT 0,
+				backoff_strategy VARCHAR(20) NOT NULL DEFAULT 'none',
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			);
+			CREATE UNIQUE INDEX idx_${sc}_project_name ON ${cron}(project_id, name);
+			CREATE INDEX idx_${sc}_next_run_at ON ${cron}(enabled, status, next_run_at);
+			CREATE TABLE ${runLog} (
+				id SERIAL PRIMARY KEY,
+				cron_id INTEGER NOT NULL,
+				cron_name VARCHAR(255) NOT NULL,
+				project_id VARCHAR(255) NOT NULL DEFAULT '_default',
+				scheduled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				completed_at TIMESTAMPTZ,
+				attempt_number INTEGER NOT NULL DEFAULT 1,
+				status VARCHAR(20),
+				result JSONB,
+				error_message TEXT,
+				error_details JSONB
+			);
+			CREATE INDEX idx_${sr}_cron_id ON ${runLog}(cron_id);
+			CREATE INDEX idx_${sr}_project_id ON ${runLog}(project_id);
+		`);
+		await db.query(
+			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`
+		);
+
+		await Cron.migrate(db, TABLE_PREFIX);
+
+		// Column renamed, data preserved
+		const cronCols = await cols(cron);
+		assert(cronCols.includes("tenant_id"), "__cron must have tenant_id");
+		assert(!cronCols.includes("project_id"), "__cron must not have project_id");
+		const runCols = await cols(runLog);
+		assert(runCols.includes("tenant_id"), "run log must have tenant_id");
+		assert(!runCols.includes("project_id"), "run log must not have project_id");
+
+		const { rows } = await db.query(
+			`SELECT tenant_id FROM ${cron} WHERE name = 'job'`
+		);
+		assertEquals(rows[0]?.tenant_id, "acme", "data must be preserved across rename");
+
+		// Indexes renamed
+		const cronIdx = await idxs(cron);
+		assert(cronIdx.includes(`idx_${sc}_tenant_name`), "unique index renamed to tenant_name");
+		assert(!cronIdx.includes(`idx_${sc}_project_name`), "old project_name index gone");
+		const runIdx = await idxs(runLog);
+		assert(runIdx.includes(`idx_${sr}_tenant_id`), "run log index renamed to tenant_id");
+		assert(!runIdx.includes(`idx_${sr}_project_id`), "old project_id index gone");
+
+		// Idempotent — a second migrate() must not throw or regress
+		await Cron.migrate(db, TABLE_PREFIX);
+		const cronCols2 = await cols(cron);
+		assert(cronCols2.includes("tenant_id") && !cronCols2.includes("project_id"));
+	} finally {
+		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
+		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+// Regression: a mixed-case `tablePrefix` must still trigger the legacy rename.
+// Postgres folds unquoted identifiers to lower case, so the `information_schema`
+// guard in migrate() must compare against lower-cased names — otherwise the
+// rename silently no-ops and strands data in the old `project_id` column.
+Deno.test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
+	const db = createPg();
+	const PREFIX = "MixCase_"; // mixed-case NAME prefix (no schema needed)
+	const cron = `${PREFIX}__cron`;
+	const runLog = `${PREFIX}__cron_run_log`;
+	const safe = (n: string) => n.replace(/\W/g, "");
+	const sc = safe(cron);
+	const sr = safe(runLog);
+
+	const cols = async (tableLower: string): Promise<string[]> => {
+		const { rows } = await db.query(
+			`SELECT column_name FROM information_schema.columns
+			 WHERE table_name = $1 AND table_schema = 'public'`,
+			[tableLower.toLowerCase()]
+		);
+		return rows.map((r) => r.column_name as string);
+	};
+
+	try {
+		await db.query(`
+			DROP TABLE IF EXISTS ${runLog};
+			DROP TABLE IF EXISTS ${cron};
+			CREATE TABLE ${cron} (
+				id SERIAL PRIMARY KEY,
+				project_id VARCHAR(255) NOT NULL DEFAULT '_default',
+				name VARCHAR(255) NOT NULL,
+				expression VARCHAR(100) NOT NULL,
+				enabled BOOLEAN NOT NULL DEFAULT TRUE,
+				status VARCHAR(20) NOT NULL DEFAULT 'idle',
+				next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_run_status VARCHAR(20),
+				max_attempts INTEGER NOT NULL DEFAULT 1,
+				max_attempt_duration_ms INTEGER NOT NULL DEFAULT 0
+			);
+			CREATE UNIQUE INDEX idx_${sc}_project_name ON ${cron}(project_id, name);
+			CREATE INDEX idx_${sc}_next_run_at ON ${cron}(enabled, status, next_run_at);
+			CREATE TABLE ${runLog} (
+				id SERIAL PRIMARY KEY,
+				cron_id INTEGER NOT NULL,
+				project_id VARCHAR(255) NOT NULL DEFAULT '_default',
+				status VARCHAR(20),
+				attempt_number INTEGER NOT NULL DEFAULT 1
+			);
+			CREATE INDEX idx_${sr}_project_id ON ${runLog}(project_id);
+		`);
+		await db.query(
+			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`
+		);
+
+		await Cron.migrate(db, PREFIX);
+
+		const cronCols = await cols(cron);
+		assert(cronCols.includes("tenant_id"), "tenant_id must exist after migrate");
+		assert(
+			!cronCols.includes("project_id"),
+			"legacy project_id must be renamed (not left stranded) for a mixed-case prefix"
+		);
+		const { rows } = await db.query(`SELECT tenant_id FROM ${cron} WHERE name = 'job'`);
+		assertEquals(rows[0]?.tenant_id, "acme", "data preserved across the case-sensitive rename");
+	} finally {
+		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
 		await db.end();
 	}
 });

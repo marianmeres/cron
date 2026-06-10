@@ -1,6 +1,6 @@
 import { type CronContext, type CronJob } from "./cron.ts";
 
-/** Finds a cron job by name (scoped to project). Returns `null` if not found. */
+/** Finds a cron job by name (scoped to tenant). Returns `null` if not found. */
 export async function _findByName(
 	context: CronContext,
 	name: string
@@ -9,8 +9,8 @@ export async function _findByName(
 	const { tableCron } = tableNames;
 
 	const { rows } = await db.query(
-		`SELECT * FROM ${tableCron} WHERE project_id = $1 AND name = $2`,
-		[context.projectId, name]
+		`SELECT * FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
+		[context.tenantId, name]
 	);
 
 	return (rows[0] as CronJob) ?? null;
@@ -27,7 +27,7 @@ export interface FetchAllOptions {
 	offset?: number;
 }
 
-/** Fetches all cron jobs (scoped to project) with optional filters and pagination. */
+/** Fetches all cron jobs (scoped to tenant) with optional filters and pagination. */
 export async function _fetchAll(
 	context: CronContext,
 	options: FetchAllOptions = {}
@@ -35,8 +35,8 @@ export async function _fetchAll(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const params: unknown[] = [context.projectId];
-	const conditions: string[] = [`project_id = $${params.length}`];
+	const params: unknown[] = [context.tenantId];
+	const conditions: string[] = [`tenant_id = $${params.length}`];
 
 	if (options.enabled !== undefined) {
 		params.push(options.enabled);

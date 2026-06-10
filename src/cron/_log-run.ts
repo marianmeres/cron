@@ -18,10 +18,10 @@ export async function _logRunStart(
 	const q = client ?? db;
 
 	const { rows } = await q.query(
-		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, project_id, scheduled_at, attempt_number)
+		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, tenant_id, scheduled_at, attempt_number)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
-		[cronId, cronName, context.projectId, scheduledAt, attemptNumber]
+		[cronId, cronName, context.tenantId, scheduledAt, attemptNumber]
 	);
 
 	return rows[0].id as number;
@@ -128,26 +128,26 @@ export async function _logRunFetchAll(
 /**
  * Deletes run log rows older than the given threshold.
  *
- * If `projectScoped` is true, only rows for `context.projectId` are deleted;
+ * If `tenantScoped` is true, only rows for `context.tenantId` are deleted;
  * otherwise the prune is global. Returns the number of rows deleted.
  */
 export async function _logRunPrune(
 	context: CronContext,
 	olderThanMinutes: number,
-	projectScoped: boolean = false
+	tenantScoped: boolean = false
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 
-	const sql = projectScoped
+	const sql = tenantScoped
 		? `DELETE FROM ${tableCronRunLog}
-		   WHERE project_id = $1
+		   WHERE tenant_id = $1
 		     AND started_at < NOW() - ($2 * INTERVAL '1 minute')`
 		: `DELETE FROM ${tableCronRunLog}
 		   WHERE started_at < NOW() - ($1 * INTERVAL '1 minute')`;
 
-	const params = projectScoped
-		? [context.projectId, olderThanMinutes]
+	const params = tenantScoped
+		? [context.tenantId, olderThanMinutes]
 		: [olderThanMinutes];
 
 	const result = await db.query(sql, params);

@@ -8,7 +8,7 @@ PostgreSQL-backed recurring cron job scheduler. Concurrent workers via
 `FOR UPDATE SKIP LOCKED`, drift-safe scheduling, real transactions on `pg.Pool`,
 per-claim lease tokens (so stale-recovered jobs cannot clobber fresh
 results), retries with capped exponential backoff, per-attempt timeouts with
-`AbortSignal` cancellation, IANA timezone-aware schedules, project-scoped
+`AbortSignal` cancellation, IANA timezone-aware schedules, tenant-scoped
 isolation, and an optional task registry for UI-driven job management.
 
 ## Installation
@@ -52,35 +52,35 @@ cron.onError("daily-report", (job) => {
 process.on("SIGTERM", () => cron.stop({ drainTimeoutMs: 30_000 }));
 ```
 
-### Project scoping
+### Tenant scoping
 
-One deployment can manage jobs for multiple isolated projects. Use `forProject()` to
-get a lightweight project-scoped view (`CronProjectScope`) that shares the parent's
-processor pool. A single `start()` call processes all projects.
+One deployment can manage jobs for multiple isolated tenants. Use `forTenant()` to
+get a lightweight tenant-scoped view (`CronTenantScope`) that shares the parent's
+processor pool. A single `start()` call processes all tenants.
 
 ```typescript
-import { Cron, CronProjectScope } from "@marianmeres/cron";
+import { Cron, CronTenantScope } from "@marianmeres/cron";
 
 const cron = new Cron({ db });
 
-// Create project-scoped views (no lifecycle methods — start/stop stay on parent)
-const projA: CronProjectScope = cron.forProject("project-a");
-const projB: CronProjectScope = cron.forProject("project-b");
+// Create tenant-scoped views (no lifecycle methods — start/stop stay on parent)
+const tenantA: CronTenantScope = cron.forTenant("tenant-a");
+const tenantB: CronTenantScope = cron.forTenant("tenant-b");
 
 // Same job name, completely isolated schedules/payloads/handlers
-await projA.register("send-report", "0 9 * * *", handlerA);
-await projB.register("send-report", "0 18 * * *", handlerB);
+await tenantA.register("send-report", "0 9 * * *", handlerA);
+await tenantB.register("send-report", "0 18 * * *", handlerB);
 
-// One pool processes ALL projects
+// One pool processes ALL tenants
 await cron.start(2);
 
 // Queries are also scoped
-const jobsA = await projA.fetchAll(); // only project-a jobs
-const jobsB = await projB.fetchAll(); // only project-b jobs
+const jobsA = await tenantA.fetchAll(); // only tenant-a jobs
+const jobsB = await tenantB.fetchAll(); // only tenant-b jobs
 ```
 
-When `projectId` is omitted (i.e. `new Cron({ db })`), it defaults to `"_default"` —
-single-project usage works exactly as before.
+When `tenantId` is omitted (i.e. `new Cron({ db })`), it defaults to `"_default"` —
+single-tenant usage works exactly as before.
 
 ### Retries, timeouts, and cancellation
 
@@ -158,7 +158,7 @@ UI can list available tasks, render dynamic parameter forms, and validate user i
 before creating cron jobs.
 
 ```typescript
-import { createTaskRegistry, syncRegistryToCron, Cron, CronProjectScope } from "@marianmeres/cron";
+import { createTaskRegistry, syncRegistryToCron, Cron, CronTenantScope } from "@marianmeres/cron";
 
 // 1. Define the catalog of things your system can do
 const registry = createTaskRegistry();
@@ -197,20 +197,20 @@ const result = await registry.validate("send-report", {
   format: "pdf",
 });
 
-// 4. Wire handlers to a project scope. Returns:
+// 4. Wire handlers to a tenant scope. Returns:
 //    - synced: handlers wired
 //    - orphans: DB jobs with no matching registry entry
 //    - removedHandlers: in-memory handlers no longer in the registry (auto-removed)
 const cron = new Cron({ db });
-const myProject = cron.forProject("my-project");
-const { synced, orphans, removedHandlers } = await syncRegistryToCron(myProject, registry);
+const myTenant = cron.forTenant("my-tenant");
+const { synced, orphans, removedHandlers } = await syncRegistryToCron(myTenant, registry);
 
 await cron.start(2);
 ```
 
-`syncRegistryToCron` accepts both a `Cron` instance and a `CronProjectScope`. When
-passed a project scope, the registry's handlers are bound to that specific project —
-so the same task type definitions can serve multiple projects, each with its own
+`syncRegistryToCron` accepts both a `Cron` instance and a `CronTenantScope`. When
+passed a tenant scope, the registry's handlers are bound to that specific tenant —
+so the same task type definitions can serve multiple tenants, each with its own
 schedules and payloads, while sharing one processor pool.
 
 > **Note:** Schema validation requires `@marianmeres/modelize` as a dependency
@@ -237,8 +237,9 @@ Impossible date combinations (e.g. `0 0 31 2 *` — Feb 31) are rejected at pars
 
 ### Migrating from earlier versions
 
-`Cron.migrate()` is idempotent and brings any prior schema (v1 with no
-`project_id`, or v2 without `lease_token` / `timezone` / CHECK constraints)
+`Cron.migrate()` is idempotent and brings any prior schema — including a legacy
+install that still has the old `project_id` column, a v1 schema with no scope
+column, or a v2 schema without `lease_token` / `timezone` / CHECK constraints —
 up to current:
 
 ```typescript
@@ -247,8 +248,20 @@ await Cron.migrate(db);
 await Cron.migrate(db, "myschema.");
 ```
 
-It adds missing columns (`project_id`, `lease_token`, `timezone`), adjusts
-indexes, and adds CHECK constraints. Safe to call multiple times.
+It renames a legacy `project_id` column (and its indexes) to `tenant_id` **in
+place**, preserving existing data; adds missing columns (`tenant_id`,
+`lease_token`, `timezone`); adjusts indexes; and adds CHECK constraints. Safe to
+call multiple times.
+
+## Breaking changes vs 2.x
+
+- **`project_id` renamed to `tenant_id` throughout.** The DB column, the
+  `CronJob.tenant_id` / `CronRunLog.tenant_id` fields, the `CronOptions.tenantId`
+  option, `Cron.forTenant()` (was `forProject()`), the `CronTenantScope`
+  interface (was `CronProjectScope`), and the `DEFAULT_TENANT_ID` export (was
+  `DEFAULT_PROJECT_ID`) all use the `tenant` naming now. Run `Cron.migrate(db)`
+  once on upgrade — it renames the legacy `project_id` column and its indexes to
+  `tenant_id` in place, preserving existing data.
 
 ## Breaking changes vs 1.x
 

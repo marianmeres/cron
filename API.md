@@ -11,7 +11,7 @@ const cron = new Cron(options: CronOptions);
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `db` | `pg.Pool \| pg.Client` | required | PostgreSQL connection |
-| `projectId` | `string` | `"_default"` | Project scope identifier — isolates all jobs to this project |
+| `tenantId` | `string` | `"_default"` | Tenant scope identifier — isolates all jobs to this tenant |
 | `tablePrefix` | `string` | `""` | Prefix for table names (e.g. `"myschema."`) |
 | `pollTimeoutMs` | `number` | `1000` | Poll interval when no jobs are due (ms) |
 | `gracefulSigterm` | `boolean` | `true` | Register SIGTERM handler for graceful shutdown |
@@ -20,24 +20,24 @@ const cron = new Cron(options: CronOptions);
 | `dbHealthCheck` | `boolean \| object` | — | Enable DB health monitoring |
 | `autoCleanup` | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | — | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`) |
 
-#### Project scoping
+#### Tenant scoping
 
-The `Cron` constructor accepts a `projectId` for its own default scope (used by direct method calls like `cron.register()`). For multi-project setups, use `cron.forProject()` to get lightweight project-scoped views that share the same processor pool.
+The `Cron` constructor accepts a `tenantId` for its own default scope (used by direct method calls like `cron.register()`). For multi-tenant setups, use `cron.forTenant()` to get lightweight tenant-scoped views that share the same processor pool.
 
-Processors are **global** — a single `start()` call serves all projects. The claim query has no `project_id` filter; handlers are resolved via composite keys.
+Processors are **global** — a single `start()` call serves all tenants. The claim query has no `tenant_id` filter; handlers are resolved via composite keys.
 
 ```typescript
 const cron = new Cron({ db });
-const projA = cron.forProject("project-a");
-const projB = cron.forProject("project-b");
+const tenantA = cron.forTenant("tenant-a");
+const tenantB = cron.forTenant("tenant-b");
 
-await projA.register("report", "0 9 * * *", handlerA);
-await projB.register("report", "0 18 * * *", handlerB);
+await tenantA.register("report", "0 9 * * *", handlerA);
+await tenantB.register("report", "0 18 * * *", handlerB);
 
-await cron.start(2); // single pool processes all projects
+await cron.start(2); // single pool processes all tenants
 ```
 
-When `projectId` is omitted, it defaults to `"_default"` (exported as `DEFAULT_PROJECT_ID`). Single-project usage is unchanged.
+When `tenantId` is omitted, it defaults to `"_default"` (exported as `DEFAULT_TENANT_ID`). Single-tenant usage is unchanged.
 
 ---
 
@@ -45,7 +45,7 @@ When `projectId` is omitted, it defaults to `"_default"` (exported as `DEFAULT_P
 
 #### `cron.start(processorsCount?: number): Promise<void>`
 
-Initialises the schema (idempotent) and starts N polling workers. Processors are global — they claim any due job regardless of `project_id`. One `start()` call serves all projects.
+Initialises the schema (idempotent) and starts N polling workers. Processors are global — they claim any due job regardless of `tenant_id`. One `start()` call serves all tenants.
 
 ```typescript
 await cron.start(2); // 2 concurrent workers (default)
@@ -73,12 +73,12 @@ Permanently removes all tables created by this package.
 
 Registers (or updates) a cron job. On first call creates the DB row; on subsequent calls updates expression/options but preserves `next_run_at` unless `forceNextRunRecalculate` is set.
 
-The job is scoped to the instance's `projectId`. The unique constraint is `(project_id, name)`.
+The job is scoped to the instance's `tenantId`. The unique constraint is `(tenant_id, name)`.
 
 Throws if `expression` is not a valid 5-field cron expression — including impossible date combinations like `0 0 31 2 *` (Feb 31).
 
 **Parameters:**
-- `name` (string) — Job identifier (unique within the project)
+- `name` (string) — Job identifier (unique within the tenant)
 - `expression` (string) — 5-field cron expression
 - `handler` (CronHandler) — Async function to execute
 - `options` (CronRegisterOptions, optional)
@@ -112,7 +112,7 @@ const job = await cron.register("backup", "0 2 * * *", async (job, signal) => {
 
 #### `cron.unregister(name: string): Promise<void>`
 
-Hard-deletes a job and its run log from the database (scoped to project). Also removes the in-memory handler.
+Hard-deletes a job and its run log from the database (scoped to tenant). Also removes the in-memory handler.
 
 #### `cron.setHandler(name, handler): Cron`
 
@@ -132,7 +132,7 @@ Returns `true` if an in-memory handler is registered.
 
 #### `cron.listHandlerNames(): string[]`
 
-Returns the job names of all in-memory handlers in the current project.
+Returns the job names of all in-memory handlers in the current tenant.
 
 ---
 
@@ -140,11 +140,11 @@ Returns the job names of all in-memory handlers in the current project.
 
 #### `cron.enable(name: string): Promise<CronJob>`
 
-Enables a disabled job (scoped to project). Returns the updated row.
+Enables a disabled job (scoped to tenant). Returns the updated row.
 
 #### `cron.disable(name: string): Promise<CronJob>`
 
-Disables a job (scoped to project). Disabled jobs are skipped during polling. Returns the updated row.
+Disables a job (scoped to tenant). Disabled jobs are skipped during polling. Returns the updated row.
 
 ---
 
@@ -152,11 +152,11 @@ Disables a job (scoped to project). Disabled jobs are skipped during polling. Re
 
 #### `cron.find(name: string): Promise<CronJob | null>`
 
-Fetches a job by name within the current project. Returns `null` if not found.
+Fetches a job by name within the current tenant. Returns `null` if not found.
 
 #### `cron.fetchAll(options?): Promise<CronJob[]>`
 
-Fetches all registered jobs for the current project.
+Fetches all registered jobs for the current tenant.
 
 **Options:**
 - `enabled` (boolean) — Filter by enabled state
@@ -182,8 +182,8 @@ Resets stuck `running` jobs back to `idle` (crash recovery). Default threshold: 
 When recovering a stuck row, the row's `lease_token` is cleared. If the original (still-alive) worker later writes a result, its `WHERE id = $ AND lease_token = $` predicate fails — preventing it from clobbering whatever fresh execution has happened in the meantime.
 
 **Global vs scoped cleanup:**
-- Called on `Cron` instance: recovers **all** stuck jobs globally (no `project_id` filter).
-- Called on `CronProjectScope` (via `forProject()`): recovers only that project's stuck jobs.
+- Called on `Cron` instance: recovers **all** stuck jobs globally (no `tenant_id` filter).
+- Called on `CronTenantScope` (via `forTenant()`): recovers only that tenant's stuck jobs.
 
 #### `cron.pruneRunLog(olderThanMinutes: number): Promise<number>`
 
@@ -196,7 +196,7 @@ await cron.pruneRunLog(60 * 24 * 30);
 
 #### `cron.healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>`
 
-Returns execution statistics grouped by `status` (scoped to project). Useful for monitoring dashboards.
+Returns execution statistics grouped by `status` (scoped to tenant). Useful for monitoring dashboards.
 
 ```typescript
 const stats = await cron.healthPreview(60); // last 60 minutes
@@ -227,21 +227,21 @@ Removes all event listeners. Primarily used in tests.
 
 ---
 
-### Project Scoping
+### Tenant Scoping
 
-#### `cron.forProject(projectId): CronProjectScope`
+#### `cron.forTenant(tenantId): CronTenantScope`
 
-Returns a lightweight project-scoped view sharing the parent's processor pool.
+Returns a lightweight tenant-scoped view sharing the parent's processor pool.
 
-The returned `CronProjectScope` exposes all management methods but **no** lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`) — those stay on the parent `Cron`.
+The returned `CronTenantScope` exposes all management methods but **no** lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`) — those stay on the parent `Cron`.
 
 ```typescript
-const projA = cron.forProject("project-a");
-await projA.register("report", "0 9 * * *", handler);
-const jobs = await projA.fetchAll();
+const tenantA = cron.forTenant("tenant-a");
+await tenantA.register("report", "0 9 * * *", handler);
+const jobs = await tenantA.fetchAll();
 ```
 
-**`CronProjectScope` methods:**
+**`CronTenantScope` methods:**
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
@@ -253,16 +253,16 @@ const jobs = await projA.fetchAll();
 | `fetchAll` | `(options?) => Promise<CronJob[]>` | |
 | `getRunHistory` | `(name, options?) => Promise<CronRunLog[]>` | |
 | `healthPreview` | `(sinceMinutesAgo?) => Promise<CronHealthPreviewRow[]>` | |
-| `cleanup` | `(maxMins?) => Promise<number>` | Project-scoped (only this project's stuck jobs) |
-| `pruneRunLog` | `(olderThanMinutes) => Promise<number>` | Project-scoped |
-| `setHandler` | `(name, handler) => CronProjectScope` | Chainable |
+| `cleanup` | `(maxMins?) => Promise<number>` | Tenant-scoped (only this tenant's stuck jobs) |
+| `pruneRunLog` | `(olderThanMinutes) => Promise<number>` | Tenant-scoped |
+| `setHandler` | `(name, handler) => CronTenantScope` | Chainable |
 | `hasHandler` | `(name) => boolean` | |
 | `listHandlerNames` | `() => string[]` | |
-| `removeHandler` | `(name) => CronProjectScope` | Chainable |
+| `removeHandler` | `(name) => CronTenantScope` | Chainable |
 | `onDone` | `(name, cb, skipIfExists?) => Unsubscriber` | |
 | `onError` | `(name, cb, skipIfExists?) => Unsubscriber` | |
 
-The `projectId` is available as a readonly property: `projA.projectId`.
+The `tenantId` is available as a readonly property: `tenantA.tenantId`.
 
 ---
 
@@ -282,7 +282,11 @@ Runs a one-off DB health check.
 
 #### `Cron.migrate(db, tablePrefix?): Promise<void>`
 
-Idempotent schema migration. Brings any prior schema (v1 with no `project_id`, or v2 without `lease_token` / `timezone` / CHECK constraints) up to current. Safe to call multiple times.
+Idempotent schema migration. Brings any prior schema up to current. Safe to call multiple times. Handles:
+
+- **Legacy `project_id` → `tenant_id`**: renames the old column (and its indexes) in place when present, preserving existing data.
+- **v1 → v2**: adds the `tenant_id` column and reshapes indexes.
+- **v2 → v3**: adds `lease_token` and `timezone` columns plus CHECK constraints.
 
 The migration runs in a real transaction (single connection — works against `pg.Pool`).
 
@@ -416,7 +420,7 @@ console.log("Stale handlers removed:", removedHandlers);
 interface CronJob {
   id: number;
   uid: string;
-  project_id: string;
+  tenant_id: string;
   name: string;
   expression: string;
   timezone: string | null;             // IANA tz, null = host local time
@@ -442,7 +446,7 @@ interface CronRunLog {
   id: number;
   cron_id: number;
   cron_name: string;
-  project_id: string;
+  tenant_id: string;
   scheduled_at: Date;      // next_run_at captured at claim time (drift-safe reference)
   started_at: Date;
   completed_at: Date | null;
@@ -466,11 +470,11 @@ interface CronHealthPreviewRow {
 
 A single row from the health preview query, representing execution statistics grouped by run status.
 
-### `CronProjectScope`
+### `CronTenantScope`
 
 ```typescript
-interface CronProjectScope {
-  readonly projectId: string;
+interface CronTenantScope {
+  readonly tenantId: string;
   register(name, expression, handler, options?): Promise<CronJob>;
   unregister(name): Promise<void>;
   enable(name): Promise<CronJob>;
@@ -481,16 +485,16 @@ interface CronProjectScope {
   healthPreview(sinceMinutesAgo?): Promise<CronHealthPreviewRow[]>;
   cleanup(maxAllowedRunDurationMinutes?): Promise<number>;
   pruneRunLog(olderThanMinutes): Promise<number>;
-  setHandler(name, handler): CronProjectScope;
+  setHandler(name, handler): CronTenantScope;
   hasHandler(name): boolean;
   listHandlerNames(): string[];
-  removeHandler(name): CronProjectScope;
+  removeHandler(name): CronTenantScope;
   onDone(name, cb, skipIfExists?): Unsubscriber;
   onError(name, cb, skipIfExists?): Unsubscriber;
 }
 ```
 
-A lightweight project-scoped view returned by `cron.forProject()`. Shares the parent's processor pool. Has all management methods but no lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`). The `cleanup()` and `pruneRunLog()` methods on a scope are project-scoped (only that project's rows), unlike the global `cron.cleanup()` / `cron.pruneRunLog()`.
+A lightweight tenant-scoped view returned by `cron.forTenant()`. Shares the parent's processor pool. Has all management methods but no lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`). The `cleanup()` and `pruneRunLog()` methods on a scope are tenant-scoped (only that tenant's rows), unlike the global `cron.cleanup()` / `cron.pruneRunLog()`.
 
 ### `TaskDefinition`
 
@@ -560,9 +564,9 @@ interface CronStopOptions {
 
 ## Constants
 
-### `DEFAULT_PROJECT_ID`
+### `DEFAULT_TENANT_ID`
 
-`"_default"` — The project identifier used when no `projectId` is specified in `CronOptions`.
+`"_default"` — The tenant identifier used when no `tenantId` is specified in `CronOptions`.
 
 ### `CRON_STATUS`
 

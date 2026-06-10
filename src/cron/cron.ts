@@ -25,9 +25,9 @@ import {
 } from "./utils/db-health.ts";
 
 /**
- * Default project identifier used when no `projectId` is specified.
+ * Default tenant identifier used when no `tenantId` is specified.
  */
-export const DEFAULT_PROJECT_ID = "_default";
+export const DEFAULT_TENANT_ID = "_default";
 
 /**
  * Available cron job statuses.
@@ -91,7 +91,7 @@ export interface CronContext {
 	logger: Logger;
 	pubsubDone: ReturnType<typeof createPubSub>;
 	pubsubError: ReturnType<typeof createPubSub>;
-	projectId: string;
+	tenantId: string;
 }
 
 /**
@@ -103,7 +103,7 @@ export interface CronContext {
 export interface CronJob {
 	id: number;
 	uid: string;
-	project_id: string;
+	tenant_id: string;
 	name: string;
 	expression: string;
 	/** IANA timezone the expression is evaluated in, or `null` for host local time. */
@@ -138,7 +138,7 @@ export interface CronRunLog {
 	id: number;
 	cron_id: number;
 	cron_name: string;
-	project_id: string;
+	tenant_id: string;
 	/** The next_run_at value that was claimed — used for drift-safe scheduling */
 	scheduled_at: Date;
 	started_at: Date;
@@ -200,8 +200,8 @@ export interface CronRegisterOptions {
 export interface CronOptions {
 	db: pg.Pool | pg.Client;
 	logger?: Logger;
-	/** Project scope identifier (default: '_default') */
-	projectId?: string;
+	/** Tenant scope identifier (default: '_default') */
+	tenantId?: string;
 	/** Table name prefix, e.g. "myschema." for schema qualification */
 	tablePrefix?: string;
 	/** Polling interval in milliseconds when no jobs are due (default: 1000) */
@@ -249,13 +249,13 @@ export interface CronStopOptions {
 }
 
 /**
- * A lightweight project-scoped view over a shared `Cron` instance.
+ * A lightweight tenant-scoped view over a shared `Cron` instance.
  *
- * Created via `cron.forProject(projectId)`. Shares the processor pool
- * with the parent `Cron` — only management methods are project-scoped.
+ * Created via `cron.forTenant(tenantId)`. Shares the processor pool
+ * with the parent `Cron` — only management methods are tenant-scoped.
  */
-export interface CronProjectScope {
-	readonly projectId: string;
+export interface CronTenantScope {
+	readonly tenantId: string;
 	register(
 		name: string,
 		expression: string,
@@ -279,10 +279,10 @@ export interface CronProjectScope {
 	healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>;
 	cleanup(maxAllowedRunDurationMinutes?: number): Promise<number>;
 	pruneRunLog(olderThanMinutes: number): Promise<number>;
-	setHandler(name: string, handler: CronHandler | undefined | null): CronProjectScope;
+	setHandler(name: string, handler: CronHandler | undefined | null): CronTenantScope;
 	hasHandler(name: string): boolean;
 	listHandlerNames(): string[];
-	removeHandler(name: string): CronProjectScope;
+	removeHandler(name: string): CronTenantScope;
 	onDone(
 		name: string | string[],
 		cb: (job: CronJob) => void,
@@ -309,8 +309,8 @@ function _tableNames(tablePrefix: string = ""): CronContext["tableNames"] {
  * Manages named cron jobs with PostgreSQL persistence, `FOR UPDATE SKIP LOCKED`
  * claiming for safe concurrent workers, and drift-safe `next_run_at` scheduling.
  *
- * Processors are global — a single `start()` call serves all projects.
- * Use `forProject()` to get a project-scoped management view sharing the same
+ * Processors are global — a single `start()` call serves all tenants.
+ * Use `forTenant()` to get a tenant-scoped management view sharing the same
  * processor pool.
  *
  * @example
@@ -319,13 +319,13 @@ function _tableNames(tablePrefix: string = ""): CronContext["tableNames"] {
  *
  * const cron = new Cron({ db: pgPool });
  *
- * const projA = cron.forProject("project-a");
- * const projB = cron.forProject("project-b");
+ * const tenantA = cron.forTenant("tenant-a");
+ * const tenantB = cron.forTenant("tenant-b");
  *
- * await projA.register("report", "0 9 * * *", handlerA);
- * await projB.register("report", "0 18 * * *", handlerB);
+ * await tenantA.register("report", "0 9 * * *", handlerA);
+ * await tenantB.register("report", "0 18 * * *", handlerB);
  *
- * await cron.start(2); // single pool processes ALL projects
+ * await cron.start(2); // single pool processes ALL tenants
  * ```
  */
 export class Cron {
@@ -368,7 +368,7 @@ export class Cron {
 			tablePrefix = "",
 			logger = createClog("cron"),
 			gracefulSigterm = true,
-			projectId = DEFAULT_PROJECT_ID,
+			tenantId = DEFAULT_TENANT_ID,
 			dbRetry,
 			dbHealthCheck,
 			autoCleanup,
@@ -409,21 +409,21 @@ export class Cron {
 			logger: this.#logger,
 			pubsubDone: this.#pubsubDone,
 			pubsubError: this.#pubsubError,
-			projectId,
+			tenantId,
 		};
 	}
 
 	// --- Private helpers ---
 
-	/** Composite key for the handler map: `${projectId}\0${name}` */
-	#handlerKey(projectId: string, name: string): string {
-		return `${projectId}\0${name}`;
+	/** Composite key for the handler map: `${tenantId}\0${name}` */
+	#handlerKey(tenantId: string, name: string): string {
+		return `${tenantId}\0${name}`;
 	}
 
-	/** Returns a CronContext scoped to a specific projectId */
-	#projectContext(projectId: string): CronContext {
-		if (projectId === this.#context.projectId) return this.#context;
-		return { ...this.#context, projectId };
+	/** Returns a CronContext scoped to a specific tenantId */
+	#tenantContext(tenantId: string): CronContext {
+		if (tenantId === this.#context.tenantId) return this.#context;
+		return { ...this.#context, tenantId };
 	}
 
 	/** Wrapper for database operations with optional retry */
@@ -466,7 +466,7 @@ export class Cron {
 		return this.#initPromise;
 	}
 
-	// --- Processor (global — claims any due job regardless of project) ---
+	// --- Processor (global — claims any due job regardless of tenant) ---
 
 	async #processJobs(processorId: string): Promise<void> {
 		const noopHandler: CronHandler = (_job) => ({ noop: true });
@@ -483,15 +483,15 @@ export class Cron {
 					const { job, leaseToken } = claimed;
 					this.#activeJobs.add(job.id);
 					try {
-						const key = this.#handlerKey(job.project_id, job.name);
+						const key = this.#handlerKey(job.tenant_id, job.name);
 						const handler = this.#handlers.get(key);
 						if (!handler) {
 							this.#logger?.warn?.(
-								`No handler for cron job "${job.name}" (project: ${job.project_id}), using noop`
+								`No handler for cron job "${job.name}" (tenant: ${job.tenant_id}), using noop`
 							);
 						}
 						this.#logger?.debug?.(
-							`Executing cron job "${job.name}" (project: ${job.project_id})...`
+							`Executing cron job "${job.name}" (tenant: ${job.tenant_id})...`
 						);
 						await _executeCronJob(
 							this.#context,
@@ -529,10 +529,10 @@ export class Cron {
 		this.#logger?.debug?.(`Cron processor "${processorId}" stopped`);
 	}
 
-	// --- Private #do* methods (project-parameterized) ---
+	// --- Private #do* methods (tenant-parameterized) ---
 
 	async #doRegister(
-		projectId: string,
+		tenantId: string,
 		name: string,
 		expression: string,
 		handler: CronHandler,
@@ -553,10 +553,10 @@ export class Cron {
 
 		await this.#initializeOnce();
 
-		this.#doSetHandler(projectId, name, handler);
+		this.#doSetHandler(tenantId, name, handler);
 
 		return await _register(
-			this.#projectContext(projectId),
+			this.#tenantContext(tenantId),
 			{
 				name,
 				expression,
@@ -571,52 +571,52 @@ export class Cron {
 		);
 	}
 
-	async #doUnregister(projectId: string, name: string): Promise<void> {
+	async #doUnregister(tenantId: string, name: string): Promise<void> {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
 		await db.query(
-			`DELETE FROM ${tableCron} WHERE project_id = $1 AND name = $2`,
-			[projectId, name]
+			`DELETE FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
+			[tenantId, name]
 		);
-		this.#handlers.delete(this.#handlerKey(projectId, name));
+		this.#handlers.delete(this.#handlerKey(tenantId, name));
 	}
 
-	async #doEnable(projectId: string, name: string): Promise<CronJob> {
+	async #doEnable(tenantId: string, name: string): Promise<CronJob> {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
 		const { rows } = await db.query(
 			`UPDATE ${tableCron}
 			SET enabled = TRUE, updated_at = NOW()
-			WHERE project_id = $1 AND name = $2
+			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
-			[projectId, name]
+			[tenantId, name]
 		);
 		return rows[0] as CronJob;
 	}
 
-	async #doDisable(projectId: string, name: string): Promise<CronJob> {
+	async #doDisable(tenantId: string, name: string): Promise<CronJob> {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
 		const { rows } = await db.query(
 			`UPDATE ${tableCron}
 			SET enabled = FALSE, updated_at = NOW()
-			WHERE project_id = $1 AND name = $2
+			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
-			[projectId, name]
+			[tenantId, name]
 		);
 		return rows[0] as CronJob;
 	}
 
-	async #doFind(projectId: string, name: string): Promise<CronJob | null> {
+	async #doFind(tenantId: string, name: string): Promise<CronJob | null> {
 		await this.#initializeOnce();
-		return await _findByName(this.#projectContext(projectId), name);
+		return await _findByName(this.#tenantContext(tenantId), name);
 	}
 
 	async #doFetchAll(
-		projectId: string,
+		tenantId: string,
 		options: {
 			enabled?: boolean;
 			status?: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
@@ -625,61 +625,61 @@ export class Cron {
 		} = {}
 	): Promise<CronJob[]> {
 		await this.#initializeOnce();
-		return await _fetchAll(this.#projectContext(projectId), options);
+		return await _fetchAll(this.#tenantContext(tenantId), options);
 	}
 
 	async #doGetRunHistory(
-		projectId: string,
+		tenantId: string,
 		name: string,
 		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
 	): Promise<CronRunLog[]> {
 		await this.#initializeOnce();
-		const ctx = this.#projectContext(projectId);
+		const ctx = this.#tenantContext(tenantId);
 		const job = await _findByName(ctx, name);
 		if (!job) return [];
 		return await _logRunFetchAll(ctx, job.id, options);
 	}
 
 	async #doHealthPreview(
-		projectId: string,
+		tenantId: string,
 		sinceMinutesAgo: number = 60
 	): Promise<CronHealthPreviewRow[]> {
 		await this.#initializeOnce();
-		return await _healthPreview(this.#projectContext(projectId), sinceMinutesAgo);
+		return await _healthPreview(this.#tenantContext(tenantId), sinceMinutesAgo);
 	}
 
 	async #doCleanup(
-		projectId: string,
+		tenantId: string,
 		maxAllowedRunDurationMinutes: number = 5,
-		projectScoped: boolean = true
+		tenantScoped: boolean = true
 	): Promise<number> {
 		await this.#initializeOnce();
 		return await _markStale(
-			this.#projectContext(projectId),
+			this.#tenantContext(tenantId),
 			maxAllowedRunDurationMinutes,
-			projectScoped
+			tenantScoped
 		);
 	}
 
 	async #doPruneRunLog(
-		projectId: string,
+		tenantId: string,
 		olderThanMinutes: number,
-		projectScoped: boolean
+		tenantScoped: boolean
 	): Promise<number> {
 		await this.#initializeOnce();
 		return await _logRunPrune(
-			this.#projectContext(projectId),
+			this.#tenantContext(tenantId),
 			olderThanMinutes,
-			projectScoped
+			tenantScoped
 		);
 	}
 
 	#doSetHandler(
-		projectId: string,
+		tenantId: string,
 		name: string,
 		handler: CronHandler | undefined | null
 	): void {
-		const key = this.#handlerKey(projectId, name);
+		const key = this.#handlerKey(tenantId, name);
 		if (typeof handler === "function") {
 			this.#handlers.set(key, handler);
 		} else {
@@ -687,22 +687,22 @@ export class Cron {
 		}
 	}
 
-	#doHasHandler(projectId: string, name: string): boolean {
-		return this.#handlers.has(this.#handlerKey(projectId, name));
+	#doHasHandler(tenantId: string, name: string): boolean {
+		return this.#handlers.has(this.#handlerKey(tenantId, name));
 	}
 
-	#doRemoveHandler(projectId: string, name: string): void {
-		this.#handlers.delete(this.#handlerKey(projectId, name));
+	#doRemoveHandler(tenantId: string, name: string): void {
+		this.#handlers.delete(this.#handlerKey(tenantId, name));
 	}
 
-	/** Returns all registered handler keys (composite `${projectId}\0${name}`). @internal */
+	/** Returns all registered handler keys (composite `${tenantId}\0${name}`). @internal */
 	_handlerKeys(): string[] {
 		return [...this.#handlers.keys()];
 	}
 
-	/** Returns the job names that have an in-memory handler for the given project. */
-	#doListHandlerNames(projectId: string): string[] {
-		const prefix = `${projectId}\0`;
+	/** Returns the job names that have an in-memory handler for the given tenant. */
+	#doListHandlerNames(tenantId: string): string[] {
+		const prefix = `${tenantId}\0`;
 		const out: string[] = [];
 		for (const key of this.#handlers.keys()) {
 			if (key.startsWith(prefix)) out.push(key.slice(prefix.length));
@@ -711,7 +711,7 @@ export class Cron {
 	}
 
 	#doOnEvent(
-		projectId: string,
+		tenantId: string,
 		pubsub: ReturnType<typeof createPubSub>,
 		name: string | string[],
 		cb: (job: CronJob) => void,
@@ -736,7 +736,7 @@ export class Cron {
 		const wrap = wrapped;
 
 		names.forEach((n) => {
-			const key = this.#handlerKey(projectId, n);
+			const key = this.#handlerKey(tenantId, n);
 			if (!skipIfExists || !pubsub.isSubscribed(key, wrap)) {
 				const unsub = pubsub.subscribe(key, wrap);
 				unsubs.push(unsub);
@@ -778,12 +778,12 @@ export class Cron {
 	 * Returns `true` if an in-memory handler is registered for the given name.
 	 */
 	hasHandler(name: string): boolean {
-		return this.#doHasHandler(this.#context.projectId, name);
+		return this.#doHasHandler(this.#context.tenantId, name);
 	}
 
-	/** Returns the names of all in-memory handlers for the current project. */
+	/** Returns the names of all in-memory handlers for the current tenant. */
 	listHandlerNames(): string[] {
-		return this.#doListHandlerNames(this.#context.projectId);
+		return this.#doListHandlerNames(this.#context.tenantId);
 	}
 
 	/**
@@ -794,7 +794,7 @@ export class Cron {
 	 * @returns The Cron instance for method chaining
 	 */
 	setHandler(name: string, handler: CronHandler | undefined | null): Cron {
-		this.#doSetHandler(this.#context.projectId, name, handler);
+		this.#doSetHandler(this.#context.tenantId, name, handler);
 		return this;
 	}
 
@@ -804,7 +804,7 @@ export class Cron {
 	 * @returns The Cron instance for method chaining
 	 */
 	removeHandler(name: string): Cron {
-		this.#doRemoveHandler(this.#context.projectId, name);
+		this.#doRemoveHandler(this.#context.tenantId, name);
 		return this;
 	}
 
@@ -813,13 +813,13 @@ export class Cron {
 		this.#handlers.clear();
 	}
 
-	// --- Lifecycle (global — not project-scoped) ---
+	// --- Lifecycle (global — not tenant-scoped) ---
 
 	/**
 	 * Initializes the database schema (if needed) and starts N polling workers.
 	 *
-	 * Processors are global — they claim any due job regardless of project.
-	 * One `start()` call serves all projects.
+	 * Processors are global — they claim any due job regardless of tenant.
+	 * One `start()` call serves all tenants.
 	 *
 	 * @param processorsCount - Number of concurrent workers (default: 2)
 	 */
@@ -955,7 +955,7 @@ export class Cron {
 		return await _uninstall(this.#context);
 	}
 
-	// --- Registration (project-scoped) ---
+	// --- Registration (tenant-scoped) ---
 
 	/**
 	 * Registers (or updates) a cron job and its handler.
@@ -973,7 +973,7 @@ export class Cron {
 		options: CronRegisterOptions = {}
 	): Promise<CronJob> {
 		return await this.#doRegister(
-			this.#context.projectId,
+			this.#context.tenantId,
 			name,
 			expression,
 			handler,
@@ -987,7 +987,7 @@ export class Cron {
 	 * Also removes the in-memory handler.
 	 */
 	async unregister(name: string): Promise<void> {
-		return await this.#doUnregister(this.#context.projectId, name);
+		return await this.#doUnregister(this.#context.tenantId, name);
 	}
 
 	/**
@@ -996,7 +996,7 @@ export class Cron {
 	 * @returns The updated CronJob row
 	 */
 	async enable(name: string): Promise<CronJob> {
-		return await this.#doEnable(this.#context.projectId, name);
+		return await this.#doEnable(this.#context.tenantId, name);
 	}
 
 	/**
@@ -1005,10 +1005,10 @@ export class Cron {
 	 * @returns The updated CronJob row
 	 */
 	async disable(name: string): Promise<CronJob> {
-		return await this.#doDisable(this.#context.projectId, name);
+		return await this.#doDisable(this.#context.tenantId, name);
 	}
 
-	// --- Querying (project-scoped) ---
+	// --- Querying (tenant-scoped) ---
 
 	/**
 	 * Finds a cron job by name.
@@ -1016,7 +1016,7 @@ export class Cron {
 	 * @returns The CronJob row, or `null` if not found
 	 */
 	async find(name: string): Promise<CronJob | null> {
-		return await this.#doFind(this.#context.projectId, name);
+		return await this.#doFind(this.#context.tenantId, name);
 	}
 
 	/**
@@ -1030,7 +1030,7 @@ export class Cron {
 			offset?: number;
 		} = {}
 	): Promise<CronJob[]> {
-		return await this.#doFetchAll(this.#context.projectId, options);
+		return await this.#doFetchAll(this.#context.tenantId, options);
 	}
 
 	/**
@@ -1042,7 +1042,7 @@ export class Cron {
 		name: string,
 		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
 	): Promise<CronRunLog[]> {
-		return await this.#doGetRunHistory(this.#context.projectId, name, options);
+		return await this.#doGetRunHistory(this.#context.tenantId, name, options);
 	}
 
 	// --- Maintenance ---
@@ -1051,17 +1051,17 @@ export class Cron {
 	 * Resets stuck `running` jobs back to `idle` (crash recovery).
 	 *
 	 * When called on a `Cron` instance: recovers ALL stuck jobs globally.
-	 * When called on a `CronProjectScope`: recovers only that project's jobs.
+	 * When called on a `CronTenantScope`: recovers only that tenant's jobs.
 	 *
 	 * @param maxAllowedRunDurationMinutes - Threshold in minutes (default: 5)
 	 * @returns The number of rows recovered
 	 */
 	async cleanup(maxAllowedRunDurationMinutes: number = 5): Promise<number> {
-		// Global cleanup — recovers all projects
+		// Global cleanup — recovers all tenants
 		return await this.#doCleanup(
-			this.#context.projectId,
+			this.#context.tenantId,
 			maxAllowedRunDurationMinutes,
-			false // projectScoped = false → global recovery
+			false // tenantScoped = false → global recovery
 		);
 	}
 
@@ -1069,13 +1069,13 @@ export class Cron {
 	 * Deletes run-log rows older than `olderThanMinutes`.
 	 *
 	 * When called on a `Cron` instance: deletes globally.
-	 * When called on a `CronProjectScope`: deletes only that project's rows.
+	 * When called on a `CronTenantScope`: deletes only that tenant's rows.
 	 *
 	 * @returns The number of rows deleted
 	 */
 	async pruneRunLog(olderThanMinutes: number): Promise<number> {
 		return await this.#doPruneRunLog(
-			this.#context.projectId,
+			this.#context.tenantId,
 			olderThanMinutes,
 			false // global
 		);
@@ -1087,10 +1087,10 @@ export class Cron {
 	 * @param sinceMinutesAgo - Time window for statistics (default: 60)
 	 */
 	async healthPreview(sinceMinutesAgo: number = 60): Promise<CronHealthPreviewRow[]> {
-		return await this.#doHealthPreview(this.#context.projectId, sinceMinutesAgo);
+		return await this.#doHealthPreview(this.#context.tenantId, sinceMinutesAgo);
 	}
 
-	// --- Events (project-scoped) ---
+	// --- Events (tenant-scoped) ---
 
 	/**
 	 * Subscribes to successful completion events for the given job name(s).
@@ -1103,7 +1103,7 @@ export class Cron {
 		skipIfExists: boolean = true
 	): Unsubscriber {
 		return this.#doOnEvent(
-			this.#context.projectId,
+			this.#context.tenantId,
 			this.#pubsubDone,
 			name,
 			cb,
@@ -1122,7 +1122,7 @@ export class Cron {
 		skipIfExists: boolean = true
 	): Unsubscriber {
 		return this.#doOnEvent(
-			this.#context.projectId,
+			this.#context.tenantId,
 			this.#pubsubError,
 			name,
 			cb,
@@ -1137,10 +1137,10 @@ export class Cron {
 		this.#eventWraps.clear();
 	}
 
-	// --- Project scoping ---
+	// --- Tenant scoping ---
 
 	/**
-	 * Returns a lightweight project-scoped view sharing this instance's
+	 * Returns a lightweight tenant-scoped view sharing this instance's
 	 * processor pool.
 	 *
 	 * The returned object exposes only management methods — lifecycle
@@ -1148,46 +1148,46 @@ export class Cron {
 	 *
 	 * @example
 	 * ```typescript
-	 * const projA = cron.forProject("project-a");
-	 * await projA.register("report", "0 9 * * *", handler);
+	 * const tenantA = cron.forTenant("tenant-a");
+	 * await tenantA.register("report", "0 9 * * *", handler);
 	 * ```
 	 */
-	forProject(projectId: string): CronProjectScope {
+	forTenant(tenantId: string): CronTenantScope {
 		// deno-lint-ignore no-this-alias
 		const self = this;
 		return {
-			get projectId() {
-				return projectId;
+			get tenantId() {
+				return tenantId;
 			},
 			register: (name, expression, handler, options?) =>
-				self.#doRegister(projectId, name, expression, handler, options),
-			unregister: (name) => self.#doUnregister(projectId, name),
-			enable: (name) => self.#doEnable(projectId, name),
-			disable: (name) => self.#doDisable(projectId, name),
-			find: (name) => self.#doFind(projectId, name),
-			fetchAll: (options?) => self.#doFetchAll(projectId, options),
+				self.#doRegister(tenantId, name, expression, handler, options),
+			unregister: (name) => self.#doUnregister(tenantId, name),
+			enable: (name) => self.#doEnable(tenantId, name),
+			disable: (name) => self.#doDisable(tenantId, name),
+			find: (name) => self.#doFind(tenantId, name),
+			fetchAll: (options?) => self.#doFetchAll(tenantId, options),
 			getRunHistory: (name, options?) =>
-				self.#doGetRunHistory(projectId, name, options),
+				self.#doGetRunHistory(tenantId, name, options),
 			healthPreview: (sinceMinutesAgo?) =>
-				self.#doHealthPreview(projectId, sinceMinutesAgo),
+				self.#doHealthPreview(tenantId, sinceMinutesAgo),
 			cleanup: (maxMins?) =>
-				self.#doCleanup(projectId, maxMins, true /* projectScoped */),
+				self.#doCleanup(tenantId, maxMins, true /* tenantScoped */),
 			pruneRunLog: (olderThanMinutes) =>
-				self.#doPruneRunLog(projectId, olderThanMinutes, true),
+				self.#doPruneRunLog(tenantId, olderThanMinutes, true),
 			setHandler(name, handler) {
-				self.#doSetHandler(projectId, name, handler);
+				self.#doSetHandler(tenantId, name, handler);
 				return this;
 			},
-			hasHandler: (name) => self.#doHasHandler(projectId, name),
-			listHandlerNames: () => self.#doListHandlerNames(projectId),
+			hasHandler: (name) => self.#doHasHandler(tenantId, name),
+			listHandlerNames: () => self.#doListHandlerNames(tenantId),
 			removeHandler(name) {
-				self.#doRemoveHandler(projectId, name);
+				self.#doRemoveHandler(tenantId, name);
 				return this;
 			},
 			onDone: (name, cb, skipIfExists?) =>
-				self.#doOnEvent(projectId, self.#pubsubDone, name, cb, skipIfExists ?? true),
+				self.#doOnEvent(tenantId, self.#pubsubDone, name, cb, skipIfExists ?? true),
 			onError: (name, cb, skipIfExists?) =>
-				self.#doOnEvent(projectId, self.#pubsubError, name, cb, skipIfExists ?? true),
+				self.#doOnEvent(tenantId, self.#pubsubError, name, cb, skipIfExists ?? true),
 		};
 	}
 
@@ -1211,11 +1211,13 @@ export class Cron {
 	 * Migrates an existing schema to the current version.
 	 *
 	 * Currently performs:
-	 * - v1 → v2: adds `project_id` and updates indexes
+	 * - legacy → current: renames the legacy `project_id` column (and its
+	 *   indexes) to `tenant_id` in place when present, preserving existing data
+	 * - v1 → v2: adds `tenant_id` and updates indexes
 	 * - v2 → v3: adds `lease_token`, `timezone`, and CHECK constraints
 	 *
-	 * Safe to call multiple times — uses `IF NOT EXISTS` / `IF EXISTS` and
-	 * idempotent CHECK additions.
+	 * Safe to call multiple times — uses `IF NOT EXISTS` / `IF EXISTS`,
+	 * existence-guarded renames, and idempotent CHECK additions.
 	 */
 	static async migrate(
 		db: pg.Pool | pg.Client,
@@ -1223,6 +1225,27 @@ export class Cron {
 	): Promise<void> {
 		const { tableCron, tableCronRunLog } = _tableNames(tablePrefix);
 		const safe = (name: string) => `${name}`.replace(/\W/g, "");
+
+		// Builds an `information_schema.columns` EXISTS predicate for a possibly
+		// schema-qualified table (e.g. "myschema.__cron"). Used to guard the
+		// legacy column rename so it's idempotent and a no-op once renamed.
+		//
+		// Postgres folds unquoted identifiers to lower case, so `information_schema`
+		// stores them lower-cased. This package always interpolates identifiers
+		// unquoted, so we lower-case the table/schema names here to match —
+		// otherwise a mixed-case `tablePrefix` would make the guard miss and skip
+		// the rename, stranding data in the old column.
+		const colExists = (qualifiedTable: string, column: string) => {
+			const dot = qualifiedTable.lastIndexOf(".");
+			const bare = (
+				dot >= 0 ? qualifiedTable.slice(dot + 1) : qualifiedTable
+			).toLowerCase();
+			const schemaPred =
+				dot >= 0
+					? ` AND table_schema = '${qualifiedTable.slice(0, dot).toLowerCase()}'`
+					: "";
+			return `EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = '${bare}'${schemaPred} AND column_name = '${column}')`;
+		};
 
 		// Use the proper transaction helper so this works against a Pool too.
 		const { withTx } = await import("./utils/with-tx.ts");
@@ -1235,25 +1258,51 @@ export class Cron {
 			.join(", ");
 
 		await withTx(db, async (client) => {
+			// legacy → current: rename the pre-2.x `project_id` column to
+			// `tenant_id` in place (data preserved). Guarded so it only fires when
+			// the legacy column exists and the new one does not — making it a
+			// no-op on fresh installs and on already-migrated schemas. Postgres has
+			// no `IF EXISTS` for `RENAME COLUMN`, hence the DO block.
+			await client.query(`
+				DO $$
+				BEGIN
+					IF ${colExists(tableCron, "project_id")}
+						AND NOT ${colExists(tableCron, "tenant_id")} THEN
+						EXECUTE 'ALTER TABLE ${tableCron} RENAME COLUMN project_id TO tenant_id';
+					END IF;
+
+					IF ${colExists(tableCronRunLog, "project_id")}
+						AND NOT ${colExists(tableCronRunLog, "tenant_id")} THEN
+						EXECUTE 'ALTER TABLE ${tableCronRunLog} RENAME COLUMN project_id TO tenant_id';
+					END IF;
+				END $$;
+
+				ALTER INDEX IF EXISTS idx_${safe(tableCron)}_project_name
+					RENAME TO idx_${safe(tableCron)}_tenant_name;
+
+				ALTER INDEX IF EXISTS idx_${safe(tableCronRunLog)}_project_id
+					RENAME TO idx_${safe(tableCronRunLog)}_tenant_id;
+			`);
+
 			// v1 → v2
 			await client.query(`
 				ALTER TABLE ${tableCron}
-					ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) NOT NULL DEFAULT '_default';
+					ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255) NOT NULL DEFAULT '_default';
 
 				DROP INDEX IF EXISTS idx_${safe(tableCron)}_name;
 
-				CREATE UNIQUE INDEX IF NOT EXISTS idx_${safe(tableCron)}_project_name
-					ON ${tableCron}(project_id, name);
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_${safe(tableCron)}_tenant_name
+					ON ${tableCron}(tenant_id, name);
 
 				DROP INDEX IF EXISTS idx_${safe(tableCron)}_next_run_at;
 				CREATE INDEX IF NOT EXISTS idx_${safe(tableCron)}_next_run_at
 					ON ${tableCron}(enabled, status, next_run_at);
 
 				ALTER TABLE ${tableCronRunLog}
-					ADD COLUMN IF NOT EXISTS project_id VARCHAR(255) NOT NULL DEFAULT '_default';
+					ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255) NOT NULL DEFAULT '_default';
 
-				CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_project_id
-					ON ${tableCronRunLog}(project_id);
+				CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_tenant_id
+					ON ${tableCronRunLog}(tenant_id);
 			`);
 
 			// v2 → v3: lease token + timezone

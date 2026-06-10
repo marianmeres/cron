@@ -4,7 +4,7 @@ import { CRON_STATUS, type CronContext, type CronJob } from "./cron.ts";
  * Atomically claims the next eligible cron job by marking it as `running`.
  *
  * Uses `FOR UPDATE SKIP LOCKED` so concurrent workers never double-claim.
- * Claims any due job regardless of `project_id` — project scoping is handled
+ * Claims any due job regardless of `tenant_id` — tenant scoping is handled
  * by the management layer, not the processor.
  *
  * Issues a fresh `lease_token` (UUID) per claim. Stale-recovery (`_markStale`)

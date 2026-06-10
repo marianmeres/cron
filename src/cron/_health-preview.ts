@@ -21,11 +21,11 @@ export async function _healthPreview(
 				3
 			) AS avg_duration_seconds
 		FROM ${tableCronRunLog}
-		WHERE project_id = $1
+		WHERE tenant_id = $1
 		  AND started_at > NOW() - ($2 * INTERVAL '1 minute')
 		GROUP BY status
 		ORDER BY status`,
-		[context.projectId, sinceMinutesAgo]
+		[context.tenantId, sinceMinutesAgo]
 	);
 
 	return rows;

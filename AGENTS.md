@@ -5,7 +5,7 @@
 - **Stack**: Deno, TypeScript, PostgreSQL (pg v8)
 - **Test**: `deno task test` (all) | `deno test -A --env-file tests/cron-db.test.ts` (DB only)
 - **Build**: `deno task npm:build`
-- **Entry**: `src/mod.ts` → `src/cron.ts` → `src/cron/cron.ts` (includes `CronProjectScope` interface)
+- **Entry**: `src/mod.ts` → `src/cron.ts` → `src/cron/cron.ts` (includes `CronTenantScope` interface)
 
 ---
 
@@ -21,16 +21,16 @@ src/
   cron/
     cron.ts               — Cron class + all types/constants
     _schema.ts            — CREATE/DROP tables (_initialize, _uninstall) — uses withTx
-    _register.ts          — UPSERT job row (keyed on project_id + name); takes timezone
+    _register.ts          — UPSERT job row (keyed on tenant_id + name); takes timezone
     _claim-next.ts        — FOR UPDATE SKIP LOCKED atomic claim; issues lease_token
     _execute.ts           — retry loop, timeout, success/failure dispatch; passes AbortSignal to handler
     _handle-success.ts    — drift-safe next_run_at after success; real TX via withTx; lease_token fence
     _handle-failure.ts    — drift-safe next_run_at after all attempts fail; real TX; lease_token fence
                             also exports _backoffMs and DEFAULT_MAX_BACKOFF_MS (5 min)
-    _find.ts              — _findByName, _fetchAll (project-scoped, fully parameterised)
+    _find.ts              — _findByName, _fetchAll (tenant-scoped, fully parameterised)
     _log-run.ts           — run log CRUD + _logRunPrune
     _mark-stale.ts        — crash recovery: reset stuck RUNNING jobs (clears lease_token)
-    _health-preview.ts    — aggregate stats from run log (project-scoped)
+    _health-preview.ts    — aggregate stats from run log (tenant-scoped)
     utils/
       sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ for Deno hygiene + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
@@ -41,7 +41,7 @@ src/
 tests/
   _pg.ts                  — createPg() from TEST_PG_* env vars
   cron.test.ts            — 34 CronParser unit tests (no DB) — incl. DoM/DoW OR, leap day, timezone
-  cron-db.test.ts         — 31 integration tests (requires DB, includes project_id scoping)
+  cron-db.test.ts         — 33 integration tests (requires DB, includes tenant_id scoping + legacy migration)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 ```
@@ -50,17 +50,17 @@ tests/
 
 ## Critical Conventions
 
-### 1. Processors are global, management is project-scoped (FUNDAMENTAL)
+### 1. Processors are global, management is tenant-scoped (FUNDAMENTAL)
 
-Processors claim any due job regardless of `project_id` — the claim query in `_claim-next.ts` has **no** project filter. Handler lookup uses composite keys: `${projectId}\0${name}`.
+Processors claim any due job regardless of `tenant_id` — the claim query in `_claim-next.ts` has **no** tenant filter. Handler lookup uses composite keys: `${tenantId}\0${name}`.
 
-Management operations (register, unregister, find, fetchAll, enable, disable, health-preview, pruneRunLog) are project-scoped via `context.projectId`. The `project_id` column appears in both `__cron` and `__cron_run_log` tables. The unique constraint on `__cron` is `(project_id, name)`.
+Management operations (register, unregister, find, fetchAll, enable, disable, health-preview, pruneRunLog) are tenant-scoped via `context.tenantId`. The `tenant_id` column appears in both `__cron` and `__cron_run_log` tables. The unique constraint on `__cron` is `(tenant_id, name)`.
 
-`forProject(projectId)` returns a `CronProjectScope` — a lightweight object that delegates to the parent `Cron`'s private `#do*` methods with a fixed `projectId`. It exposes management methods only; lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`) stay on the parent.
+`forTenant(tenantId)` returns a `CronTenantScope` — a lightweight object that delegates to the parent `Cron`'s private `#do*` methods with a fixed `tenantId`. It exposes management methods only; lifecycle methods (`start`, `stop`, `resetHard`, `uninstall`) stay on the parent.
 
-`cron.cleanup()` and `cron.pruneRunLog()` recover/prune **globally**. Their counterparts on a `CronProjectScope` are project-scoped. Controlled by the `projectScoped` parameter in `_markStale` / `_logRunPrune`.
+`cron.cleanup()` and `cron.pruneRunLog()` recover/prune **globally**. Their counterparts on a `CronTenantScope` are tenant-scoped. Controlled by the `tenantScoped` parameter in `_markStale` / `_logRunPrune`.
 
-When adding new management queries, always include `project_id` in WHERE clauses. When adding processor-level logic, do NOT filter by `project_id`.
+When adding new management queries, always include `tenant_id` in WHERE clauses. When adding processor-level logic, do NOT filter by `tenant_id`.
 
 ### 2. Drift-safe scheduling (INVARIANT — never break this)
 
@@ -105,7 +105,7 @@ When adding any wait inside a processor loop or handler chain, plumb the relevan
 
 ### 6. Claim pattern
 
-`_claimNextCronJob` uses `FOR UPDATE SKIP LOCKED` — safe for concurrent workers. It does **not** filter by `project_id` (global claim). Returns `{ job, leaseToken }` — the `lease_token` is also written to the column on UPDATE. The processor resolves the handler via composite key `${job.project_id}\0${job.name}`.
+`_claimNextCronJob` uses `FOR UPDATE SKIP LOCKED` — safe for concurrent workers. It does **not** filter by `tenant_id` (global claim). Returns `{ job, leaseToken }` — the `lease_token` is also written to the column on UPDATE. The processor resolves the handler via composite key `${job.tenant_id}\0${job.name}`.
 
 ### 7. Always recurring
 
@@ -121,7 +121,7 @@ All tables are prefixed: `${tablePrefix}__cron` and `${tablePrefix}__cron_run_lo
 
 ### 10. CronContext
 
-Internal functions receive `CronContext` (not the `Cron` class). It holds `db`, `tableNames`, `logger`, `pubsubDone`, `pubsubError`, `projectId`. Handler keys in `#handlers` Map and pubsub channels use composite format: `${projectId}\0${name}`.
+Internal functions receive `CronContext` (not the `Cron` class). It holds `db`, `tableNames`, `logger`, `pubsubDone`, `pubsubError`, `tenantId`. Handler keys in `#handlers` Map and pubsub channels use composite format: `${tenantId}\0${name}`.
 
 ### 11. Day-of-month + day-of-week semantics
 
@@ -164,7 +164,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 |--------|------|-------|
 | id | SERIAL PK | |
 | uid | UUID | gen_random_uuid() |
-| project_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
+| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
 | name | VARCHAR(255) | NOT NULL |
 | expression | VARCHAR(100) | 5-field cron |
 | timezone | VARCHAR(64) | nullable; IANA tz name (default: host local) |
@@ -181,8 +181,8 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 | created_at / updated_at | TIMESTAMPTZ | |
 
 **Indexes:**
-- `UNIQUE (project_id, name)` — composite uniqueness
-- `(enabled, status, next_run_at)` — polling index (global, no project_id — processors claim across all projects)
+- `UNIQUE (tenant_id, name)` — composite uniqueness
+- `(enabled, status, next_run_at)` — polling index (global, no tenant_id — processors claim across all tenants)
 
 ### `__cron_run_log`
 | Column | Type | Notes |
@@ -190,7 +190,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 | id | SERIAL PK | |
 | cron_id | INTEGER FK | ON DELETE CASCADE |
 | cron_name | VARCHAR(255) | |
-| project_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
+| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
 | scheduled_at | TIMESTAMPTZ | next_run_at captured at claim time |
 | started_at | TIMESTAMPTZ | |
 | completed_at | TIMESTAMPTZ | nullable |
@@ -203,15 +203,16 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 **Indexes:**
 - `(cron_id)` — FK lookups
 - `(started_at DESC)` — history queries
-- `(project_id)` — per-project log queries
+- `(tenant_id)` — per-tenant log queries
 
 ### Migration
 
 `Cron.migrate(db, tablePrefix?)` is the single migration entry point. Runs in a real transaction (works on Pool). Idempotent. Currently bundles:
-- v1 → v2: add `project_id` columns + reshape indexes
+- legacy → current: rename the pre-rename `project_id` column + its indexes to `tenant_id` in place (guarded `DO` block + `ALTER INDEX IF EXISTS`); preserves data. The only place the legacy `project_id` literal is still allowed to appear.
+- v1 → v2: add `tenant_id` columns + reshape indexes
 - v2 → v3: add `lease_token` and `timezone` columns + add CHECK constraints
 
-When extending the schema in the future, add a new step inside `Cron.migrate` and bump the conceptual version note. CHECK additions go through the `addCheckIfMissing` helper (Postgres has no `IF NOT EXISTS` for constraints).
+The legacy rename uses a `colExists()` JS helper to build an `information_schema.columns` guard (Postgres has no `IF EXISTS` for `RENAME COLUMN`), schema-qualified when a `tablePrefix` carries a schema. The helper lower-cases the table/schema names so the guard matches Postgres's unquoted-identifier folding — a mixed-case `tablePrefix` would otherwise skip the rename. When extending the schema in the future, add a new step inside `Cron.migrate` and bump the conceptual version note. CHECK additions go through the `addCheckIfMissing` helper (Postgres has no `IF NOT EXISTS` for constraints).
 
 ---
 
@@ -223,10 +224,12 @@ When extending the schema in the future, add a new step inside `Cron.migrate` an
 - `noopLogger` — silent; suppress all output
 - `setup()` / `teardown()` — factory pattern per test
 - `backdateNextRun(db, name)` — forces `next_run_at` into the past so poller picks it up
-- `createCronWithProject(db, projectId)` — helper for project-scoped tests
+- `createCronWithTenant(db, tenantId)` — helper for tenant-scoped tests
 - Test 9 (timeout): handler's `sleep(500)` is abandoned by TimeoutError at 50ms; test waits 700ms to let the timer fire during the test — avoids cross-test leaks
 - Test 6 (drift): uses 200ms handler + 100ms window to guarantee exactly 1 run before `stop()`
-- Tests 21-31: project_id scoping (isolation, find, unregister, enable/disable, claim)
+- Tests 21-31: tenant_id scoping (isolation, find, unregister, enable/disable, claim)
+- Test 32: legacy `project_id` → `tenant_id` migration (column + indexes renamed in place, data preserved, idempotent)
+- Test 33: legacy migration with a mixed-case `tablePrefix` — `colExists()` lower-cases identifiers to match Postgres folding (else the rename silently no-ops)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
 - `tests/cron-fixes.test.ts`: covers withTx atomicity / rollback, lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
 
@@ -253,11 +256,11 @@ TEST_PG_PORT=5432
 
 ```typescript
 // Core
-export { Cron, DEFAULT_PROJECT_ID } from "./cron.ts";
+export { Cron, DEFAULT_TENANT_ID } from "./cron.ts";
 export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
 export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler,
               CronOptions, CronRegisterOptions, CronContext,
-              CronProjectScope, CronStopOptions } from "./cron.ts";
+              CronTenantScope, CronStopOptions } from "./cron.ts";
 export { CronParser, type CronParserOptions } from "./cron-parser.ts";
 
 // Task Registry
@@ -276,8 +279,8 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For scheduling logic changes: verify drift-safe invariant in `_handle-success.ts` and `_handle-failure.ts`
 - [ ] For new write paths against a claimed row: include `lease_token` fence in WHERE
 - [ ] For multi-statement DB work: use `withTx` (NOT `db.query("BEGIN")` on a Pool)
-- [ ] For new management queries: always include `project_id` filtering
-- [ ] For processor-level logic: do NOT filter by `project_id` (processors are global)
+- [ ] For new management queries: always include `tenant_id` filtering
+- [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
 - [ ] Run `deno task test` after changes (88 tests)

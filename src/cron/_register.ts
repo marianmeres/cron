@@ -38,10 +38,10 @@ export async function _register(
 
 	const { rows } = await db.query(
 		`INSERT INTO ${tableCron}
-			(project_id, name, expression, timezone, payload, enabled, next_run_at,
+			(tenant_id, name, expression, timezone, payload, enabled, next_run_at,
 			 max_attempts, max_attempt_duration_ms, backoff_strategy)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (project_id, name) DO UPDATE SET
+		ON CONFLICT (tenant_id, name) DO UPDATE SET
 			expression              = EXCLUDED.expression,
 			timezone                = EXCLUDED.timezone,
 			payload                 = EXCLUDED.payload,
@@ -53,7 +53,7 @@ export async function _register(
 			updated_at              = NOW()
 		RETURNING *`,
 		[
-			context.projectId,
+			context.tenantId,
 			data.name,
 			data.expression,
 			data.timezone,

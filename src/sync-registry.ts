@@ -15,7 +15,7 @@ export interface SyncRegistryResult {
 
 /**
  * Structural type accepted by `syncRegistryToCron`.
- * Works with both `Cron` and `CronProjectScope`.
+ * Works with both `Cron` and `CronTenantScope`.
  */
 type CronLike = {
 	setHandler(name: string, handler: CronHandler | undefined | null): unknown;
@@ -33,7 +33,7 @@ type CronLike = {
 const DEFAULT_PAGE_SIZE = 500;
 
 /**
- * Wires task registry handlers to a Cron or CronProjectScope instance and
+ * Wires task registry handlers to a Cron or CronTenantScope instance and
  * detects / cleans up out-of-sync state.
  *
  * For each registered task type, calls `cron.setHandler(taskType, handler)`.
