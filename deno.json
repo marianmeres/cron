@@ -21,7 +21,7 @@
     "@std/fs": "jsr:@std/fs@^1.0.24",
     "@std/path": "jsr:@std/path@^1.1.5",
     "@types/pg": "npm:@types/pg@^8.20.0",
-    "pg": "npm:pg@^8.21.0"
+    "pg": "npm:pg@^8.22.0"
   },
   "fmt": {
     "useTabs": true,
