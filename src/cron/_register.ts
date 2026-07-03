@@ -1,4 +1,4 @@
-import { CronParser } from "../cron-parser.ts";
+import { CronParser } from "@marianmeres/cron-parser";
 import { type CronContext, type CronJob } from "./cron.ts";
 
 /**

@@ -1,32 +1,42 @@
 {
-  "name": "@marianmeres/cron",
-  "version": "3.0.1",
-  "exports": "./src/mod.ts",
-  "tasks": {
-    "test": "deno test -A --env-file",
-    "test:watch": "deno test -A --env-file --watch",
-    "npm:build": "deno run -A scripts/build-npm.ts",
-    "npm:publish": "deno run -A scripts/build-npm.ts && cd ./.npm-dist && npm publish --access=public",
-    "release": "deno run -A jsr:@marianmeres/deno-release",
-    "publish": "deno publish && deno task npm:publish",
-    "rp": "deno task release -y && deno task publish",
-    "rpm": "deno task release minor -y && deno task publish"
-  },
-  "imports": {
-    "@marianmeres/clog": "jsr:@marianmeres/clog@^3.21.0",
-    "@marianmeres/modelize": "jsr:@marianmeres/modelize@^2.2.2",
-    "@marianmeres/npmbuild": "jsr:@marianmeres/npmbuild@^1.16.0",
-    "@marianmeres/pubsub": "jsr:@marianmeres/pubsub@^3.0.0",
-    "@std/assert": "jsr:@std/assert@^1.0.19",
-    "@std/fs": "jsr:@std/fs@^1.0.24",
-    "@std/path": "jsr:@std/path@^1.1.5",
-    "@types/pg": "npm:@types/pg@^8.20.0",
-    "pg": "npm:pg@^8.22.0"
-  },
-  "fmt": {
-    "useTabs": true,
-    "lineWidth": 90,
-    "indentWidth": 4,
-    "proseWrap": "preserve"
-  }
+	"name": "@marianmeres/cron",
+	"version": "3.0.1",
+	"exports": "./src/mod.ts",
+	"tasks": {
+		"test": "deno test -A --env-file",
+		"test:watch": "deno test -A --env-file --watch",
+		"npm:build": "deno run -A scripts/build-npm.ts",
+		"npm:publish": "deno run -A scripts/build-npm.ts && cd ./.npm-dist && npm publish --access=public",
+		"release": "deno run -A jsr:@marianmeres/deno-release",
+		"publish": "deno publish && deno task npm:publish",
+		"rp": "deno task release -y && deno task publish",
+		"rpm": "deno task release minor -y && deno task publish"
+	},
+	"imports": {
+		"@marianmeres/clog": "jsr:@marianmeres/clog@^3.21.0",
+		"@marianmeres/cron-parser": "jsr:@marianmeres/cron-parser@^1.0.1",
+		"@marianmeres/modelize": "jsr:@marianmeres/modelize@^2.2.2",
+		"@marianmeres/npmbuild": "jsr:@marianmeres/npmbuild@^1.16.0",
+		"@marianmeres/pubsub": "jsr:@marianmeres/pubsub@^3.0.0",
+		"@std/assert": "jsr:@std/assert@^1.0.19",
+		"@std/fs": "jsr:@std/fs@^1.0.24",
+		"@std/path": "jsr:@std/path@^1.1.6",
+		"@types/pg": "npm:@types/pg@^8.20.0",
+		"pg": "npm:pg@^8.22.0"
+	},
+	"fmt": {
+		"useTabs": true,
+		"lineWidth": 90,
+		"indentWidth": 4,
+		"proseWrap": "preserve"
+	},
+	"minimumDependencyAge": {
+		"exclude": [
+			"jsr:@marianmeres/clog",
+			"jsr:@marianmeres/cron-parser",
+			"jsr:@marianmeres/modelize",
+			"jsr:@marianmeres/npmbuild",
+			"jsr:@marianmeres/pubsub"
+		]
+	}
 }

@@ -1,4 +1,4 @@
-import { CronParser } from "../cron-parser.ts";
+import { CronParser } from "@marianmeres/cron-parser";
 import { CRON_STATUS, RUN_STATUS, type CronContext, type CronJob } from "./cron.ts";
 import { _logRunSuccess } from "./_log-run.ts";
 import { withTx } from "./utils/with-tx.ts";

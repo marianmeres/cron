@@ -13,9 +13,8 @@
 
 ```
 src/
-  mod.ts                  — public exports
+  mod.ts                  — public exports (re-exports CronParser from @marianmeres/cron-parser)
   cron.ts                 — re-exports from src/cron/cron.ts
-  cron-parser.ts          — 5-field cron notation parser (timezone-aware, POSIX DoM/DoW)
   task-registry.ts        — in-memory task type catalog with JSON Schema validation
   sync-registry.ts        — bridge: wires registry handlers to Cron, paginates DB scan, removes orphan handlers
   cron/
@@ -40,7 +39,6 @@ src/
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
 tests/
   _pg.ts                  — createPg() from TEST_PG_* env vars
-  cron.test.ts            — 34 CronParser unit tests (no DB) — incl. DoM/DoW OR, leap day, timezone
   cron-db.test.ts         — 33 integration tests (requires DB, includes tenant_id scoping + legacy migration)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
@@ -261,7 +259,7 @@ export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
 export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler,
               CronOptions, CronRegisterOptions, CronContext,
               CronTenantScope, CronStopOptions } from "./cron.ts";
-export { CronParser, type CronParserOptions } from "./cron-parser.ts";
+export { CronParser, type CronParserOptions } from "@marianmeres/cron-parser"; // re-export
 
 // Task Registry
 export { createTaskRegistry } from "./task-registry.ts";

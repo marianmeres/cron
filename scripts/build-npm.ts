@@ -9,6 +9,7 @@ await npmBuild({
 	dependencies: versionizeDeps(
 		[
 			"@marianmeres/clog",
+			"@marianmeres/cron-parser",
 			"@marianmeres/modelize",
 			"@marianmeres/parse-boolean",
 			"@marianmeres/pubsub",

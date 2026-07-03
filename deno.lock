@@ -3,17 +3,19 @@
   "specifiers": {
     "jsr:@marianmeres/batch@^1.3.0": "1.3.0",
     "jsr:@marianmeres/clog@^3.21.0": "3.21.0",
+    "jsr:@marianmeres/cron-parser@^1.0.1": "1.0.1",
     "jsr:@marianmeres/modelize@^2.2.2": "2.2.2",
     "jsr:@marianmeres/npmbuild@^1.16.0": "1.16.0",
     "jsr:@marianmeres/pubsub@3": "3.0.0",
     "jsr:@std/assert@^1.0.19": "1.0.19",
-    "jsr:@std/collections@^1.1.7": "1.2.0",
+    "jsr:@std/collections@^1.1.7": "1.3.0",
     "jsr:@std/fs@^1.0.23": "1.0.24",
     "jsr:@std/fs@^1.0.24": "1.0.24",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "jsr:@std/internal@^1.0.14": "1.0.14",
-    "jsr:@std/path@^1.1.4": "1.1.5",
-    "jsr:@std/path@^1.1.5": "1.1.5",
+    "jsr:@std/path@^1.1.4": "1.1.6",
+    "jsr:@std/path@^1.1.5": "1.1.6",
+    "jsr:@std/path@^1.1.6": "1.1.6",
     "npm:@types/pg@^8.20.0": "8.20.0",
     "npm:ajv@^8.20.0": "8.20.0",
     "npm:pg@^8.22.0": "8.22.0"
@@ -30,6 +32,9 @@
       "dependencies": [
         "jsr:@marianmeres/batch"
       ]
+    },
+    "@marianmeres/cron-parser@1.0.1": {
+      "integrity": "391fe23de01700b2e33e4b18f65705def26ea8a08d05285fe2567f8327393db4"
     },
     "@marianmeres/modelize@2.2.2": {
       "integrity": "bd1b1133acd470ec8785e6ef8965e93cda04db5788a19c7aa0591784b60194ab",
@@ -55,8 +60,8 @@
         "jsr:@std/internal@^1.0.12"
       ]
     },
-    "@std/collections@1.2.0": {
-      "integrity": "47627a21d3a13138b77fd0e4d790ba9d2e603c3510b686cde6b132fe9aa98a88"
+    "@std/collections@1.3.0": {
+      "integrity": "eb36b43d784477ea0b476483ac034a14bdd182aff921c812ecf662a1fcef9498"
     },
     "@std/fs@1.0.24": {
       "integrity": "f3061b45b81673a2bece689da041df32d174be064c89eb6397fb5718d3fb7877",
@@ -68,8 +73,8 @@
     "@std/internal@1.0.14": {
       "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
     },
-    "@std/path@1.1.5": {
-      "integrity": "ccea00982ea28c36becaf6e62f855406c76a8c32d462f66f415bbb7d83a271bc",
+    "@std/path@1.1.6": {
+      "integrity": "c68485c2a4dfbb5ae3cc74fae4e8c4e5d874cf8a8ed12927917235c758b46cbe",
       "dependencies": [
         "jsr:@std/internal@^1.0.14"
       ]
@@ -186,12 +191,13 @@
   "workspace": {
     "dependencies": [
       "jsr:@marianmeres/clog@^3.21.0",
+      "jsr:@marianmeres/cron-parser@^1.0.1",
       "jsr:@marianmeres/modelize@^2.2.2",
       "jsr:@marianmeres/npmbuild@^1.16.0",
       "jsr:@marianmeres/pubsub@3",
       "jsr:@std/assert@^1.0.19",
       "jsr:@std/fs@^1.0.24",
-      "jsr:@std/path@^1.1.5",
+      "jsr:@std/path@^1.1.6",
       "npm:@types/pg@^8.20.0",
       "npm:pg@^8.22.0"
     ]

@@ -2,7 +2,7 @@ import { createClog, type Logger } from "@marianmeres/clog";
 import { createPubSub, type Subscriber, type Unsubscriber } from "@marianmeres/pubsub";
 import process from "node:process";
 import type pg from "pg";
-import { CronParser } from "../cron-parser.ts";
+import { CronParser } from "@marianmeres/cron-parser";
 import { _claimNextCronJob } from "./_claim-next.ts";
 import { _executeCronJob } from "./_execute.ts";
 import { _fetchAll, _findByName } from "./_find.ts";
