@@ -1,6 +1,6 @@
 {
 	"name": "@marianmeres/cron",
-	"version": "3.1.0",
+	"version": "3.2.0",
 	"exports": "./src/mod.ts",
 	"tasks": {
 		"test": "deno test -A --env-file",
