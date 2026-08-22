@@ -213,8 +213,10 @@ passed a tenant scope, the registry's handlers are bound to that specific tenant
 so the same task type definitions can serve multiple tenants, each with its own
 schedules and payloads, while sharing one processor pool.
 
-> **Note:** Schema validation requires `@marianmeres/modelize` as a dependency
-> (uses AJV internally). Install it alongside this package if you use `paramsSchema`.
+> **Note:** `paramsSchema` validation compiles the schema with AJV, via
+> `@marianmeres/modelize`'s `/ajv` subpath. Under Deno/JSR both resolve
+> automatically. On npm, `ajv` is an **optional peer dependency** — npm does not
+> install it for you, so run `npm install ajv` if you use `paramsSchema`.
 
 ### Cron expression format
 

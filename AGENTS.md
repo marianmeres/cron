@@ -150,7 +150,7 @@ The `CronParser.matches()` function uses **OR** when both DoM and DoW fields are
 The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefinition>`. It has no DB dependency. Key points:
 - `define()` throws on duplicate task type names
 - `list()` omits handlers (safe for API/UI serialization)
-- `validate()` uses dynamic `import("@marianmeres/modelize")` for JSON Schema validation via AJV — returns `{ valid, errors }`. Returns `{ valid: true }` if no schema defined.
+- `validate()` dynamically imports `@marianmeres/modelize` **and** `@marianmeres/modelize/ajv` — since modelize v3 the core validates through Standard Schema only, so `ajvSchema()` adapts the plain JSON Schema document. Each import is optional and throws its own install hint (`ajv` is an optional peer dependency on npm). Returns `{ valid, errors }`, or `{ valid: true }` if no schema defined.
 - The bridge `syncRegistryToCron()` wires handlers via `cron.setHandler()`, removes orphan handlers (in-memory handlers no longer in the registry), and paginates DB scan when reporting orphan jobs.
 
 ---

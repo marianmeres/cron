@@ -140,9 +140,23 @@ export function createTaskRegistry(): TaskRegistry {
 			);
 		}
 
+		// Since modelize v3 the core validates through Standard Schema only, so a
+		// plain JSON Schema document has to be adapted via the AJV subpath, which
+		// needs `ajv` (modelize's optional peer dependency) to be installed.
+		let ajvSchema: typeof import("@marianmeres/modelize/ajv").ajvSchema;
+		try {
+			const mod = await import("@marianmeres/modelize/ajv");
+			ajvSchema = mod.ajvSchema;
+		} catch {
+			throw new Error(
+				`ajv is required for JSON Schema validation. ` +
+					`Install it alongside @marianmeres/modelize to use paramsSchema.`
+			);
+		}
+
 		const model = modelize(
 			{ ...payload } as Record<string, unknown>,
-			{ schema: def.paramsSchema }
+			{ schema: ajvSchema(def.paramsSchema) }
 		);
 
 		// deno-lint-ignore no-explicit-any
