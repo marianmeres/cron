@@ -255,6 +255,13 @@ place**, preserving existing data; adds missing columns (`tenant_id`,
 `lease_token`, `timezone`); adjusts indexes; and adds CHECK constraints. Safe to
 call multiple times.
 
+## Breaking changes in 3.2
+
+- **npm only: `paramsSchema` validation now needs `ajv` installed.** It moved to
+  `@marianmeres/modelize`'s `/ajv` subpath, where AJV is an optional peer
+  dependency that npm does not auto-install — run `npm install ajv`. Deno/JSR
+  resolves it transitively and is unaffected.
+
 ## Breaking changes vs 2.x
 
 - **`project_id` renamed to `tenant_id` throughout.** The DB column, the
