@@ -9,6 +9,7 @@ import { _fetchAll, _findByName } from "./_find.ts";
 import { _healthPreview } from "./_health-preview.ts";
 import { _logRunFetchAll, _logRunPrune } from "./_log-run.ts";
 import { _markStale } from "./_mark-stale.ts";
+import { _nextRunAt } from "./_next-run.ts";
 import { _register } from "./_register.ts";
 import {
 	_initialize,
@@ -18,6 +19,7 @@ import {
 } from "./_schema.ts";
 import { sleep } from "./utils/sleep.ts";
 import { withDbRetry, type DbRetryOptions } from "./utils/with-db-retry.ts";
+import { isPool } from "./utils/with-tx.ts";
 import {
 	checkDbHealth,
 	DbHealthMonitor,
@@ -113,6 +115,12 @@ export interface CronJob {
 	enabled: boolean;
 	status: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
 	next_run_at: Date;
+	/**
+	 * Last sign of life of a run: set when the job is claimed, renewed by the
+	 * worker's heartbeat while it executes, and set again on completion. Stale
+	 * recovery (`cleanup()`) measures from here. For the start time of a specific
+	 * attempt use `CronRunLog.started_at`.
+	 */
 	last_run_at: Date | null;
 	last_run_status:
 		| typeof RUN_STATUS.SUCCESS
@@ -198,6 +206,12 @@ export interface CronRegisterOptions {
  * ```
  */
 export interface CronOptions {
+	/**
+	 * PostgreSQL connection. Use a `pg.Pool` for anything real: a single
+	 * `pg.Client` is one session, so it is limited to **one** processor
+	 * (`start()` clamps the count) and its statements share whatever
+	 * transaction happens to be open on that session.
+	 */
 	db: pg.Pool | pg.Client;
 	logger?: Logger;
 	/** Tenant scope identifier (default: '_default') */
@@ -206,9 +220,15 @@ export interface CronOptions {
 	tablePrefix?: string;
 	/** Polling interval in milliseconds when no jobs are due (default: 1000) */
 	pollTimeoutMs?: number;
-	/** Enable SIGTERM listener for graceful shutdown (default: true) */
+	/**
+	 * Enable SIGTERM listener for graceful shutdown (default: true).
+	 * Attached by `start()`, detached by `stop()`.
+	 */
 	gracefulSigterm?: boolean;
-	/** Enable database retry on transient failures (true = defaults, or provide options) */
+	/**
+	 * Enable database retry on transient failures (true = defaults, or provide options).
+	 * Covers the claim query and the writes that record a run's outcome.
+	 */
 	dbRetry?: DbRetryOptions | boolean;
 	/** Enable database health monitoring (true = defaults, or provide options) */
 	dbHealthCheck?:
@@ -219,8 +239,21 @@ export interface CronOptions {
 				onHealthy?: (status: DbHealthStatus) => void;
 		  };
 	/**
+	 * How often (ms) a worker renews the lease of the job it is executing, by
+	 * bumping the row's `last_run_at`. This is what lets a job run longer than
+	 * the stale threshold without being re-claimed while it is still in flight.
+	 *
+	 * Keep it well below the stale threshold (`maxAllowedRunDurationMinutes`) —
+	 * a third of it or less. Default: 30_000. Pass `0` to disable.
+	 */
+	heartbeatIntervalMs?: number;
+	/**
 	 * Auto-recover stuck jobs on a timer. When set, every `intervalMs` ms the
 	 * Cron instance calls `cleanup()` (global) with the given threshold.
+	 *
+	 * `maxAllowedRunDurationMinutes` is how long a `running` job may go without a
+	 * heartbeat before it is presumed dead — not a cap on how long a job may run
+	 * (that is `max_attempt_duration_ms`).
 	 *
 	 * - `true` → defaults: `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`
 	 * - object → custom config
@@ -340,15 +373,23 @@ export class Cron {
 	#pubsubError: ReturnType<typeof createPubSub> = createPubSub();
 	#context: CronContext;
 
-	#isShuttingDown = false;
+	// >0 while a `stop()` call is draining; `start()` refuses meanwhile
+	#stopsInFlight = 0;
+	// One controller per "generation" of processors (start → stop). Each
+	// processor loop is keyed on the signal it was started with.
 	#shutdownCtrl: AbortController | null = null;
 	#wasInitialized = false;
 	#initPromise: Promise<void> | null = null;
 	#activeJobs = new Set<number>();
 	#jobProcessors: Promise<void>[] = [];
 
-	// per-instance event handler wraps: keyed by user callback
-	#eventWraps = new Map<(job: CronJob) => void, Subscriber>();
+	// Per-instance event handler wraps, keyed by user callback. `topics` mirrors
+	// the wrap's live subscriptions (`${"done" | "error"}\0${handlerKey}`) so we
+	// know exactly when it is no longer used anywhere.
+	#eventWraps = new Map<
+		(job: CronJob) => void,
+		{ wrapped: Subscriber; topics: Set<string> }
+	>();
 
 	#sigtermListener: (() => void) | null = null;
 
@@ -357,6 +398,7 @@ export class Cron {
 
 	#dbRetryOptions: DbRetryOptions | null = null;
 	#healthMonitor: DbHealthMonitor | null = null;
+	#heartbeatIntervalMs: number;
 
 	#autoCleanupTimer: ReturnType<typeof setInterval> | null = null;
 	#autoCleanupConfig: { intervalMs: number; maxAllowedRunDurationMinutes: number } | null = null;
@@ -372,6 +414,7 @@ export class Cron {
 			dbRetry,
 			dbHealthCheck,
 			autoCleanup,
+			heartbeatIntervalMs = 30_000,
 		} = options || {};
 
 		this.#db = db;
@@ -379,6 +422,7 @@ export class Cron {
 		this.pollTimeoutMs = pollTimeoutMs;
 		this.tablePrefix = tablePrefix;
 		this.gracefulSigterm = gracefulSigterm;
+		this.#heartbeatIntervalMs = heartbeatIntervalMs;
 
 		if (dbRetry) {
 			this.#dbRetryOptions =
@@ -449,14 +493,6 @@ export class Cron {
 					await _initialize(this.#context, !!hard);
 					this.#wasInitialized = true;
 					this.#logger?.debug?.(`System initialized${hard ? " (hard)" : ""}`);
-
-					if (this.gracefulSigterm && !this.#sigtermListener) {
-						this.#sigtermListener = () => {
-							this.#logger?.debug?.(`SIGTERM detected...`);
-							void this.stop();
-						};
-						process.on("SIGTERM", this.#sigtermListener);
-					}
 				} finally {
 					this.#initPromise = null;
 				}
@@ -468,44 +504,23 @@ export class Cron {
 
 	// --- Processor (global — claims any due job regardless of tenant) ---
 
-	async #processJobs(processorId: string): Promise<void> {
+	async #processJobs(processorId: string, shutdownSignal: AbortSignal): Promise<void> {
 		const noopHandler: CronHandler = (_job) => ({ noop: true });
 		const limit = 10;
-		const shutdownSignal = this.#shutdownCtrl!.signal;
 
-		while (!this.#isShuttingDown) {
+		// After a hard error, briefly pause to avoid a tight error loop — but stay
+		// responsive to shutdown.
+		const pause = () =>
+			sleep(Math.min(this.pollTimeoutMs, 1_000), undefined, shutdownSignal);
+
+		// Keyed on the signal this processor was started with, NOT on instance
+		// state: a processor abandoned by a drain-capped `stop()` must wind down
+		// when its handler finally returns, whatever the instance has done since
+		// (including being started again).
+		while (!shutdownSignal.aborted) {
+			let claimed: Awaited<ReturnType<typeof _claimNextCronJob>>;
 			try {
-				const claimed = await this.#withRetry(() =>
-					_claimNextCronJob(this.#context)
-				);
-
-				if (claimed) {
-					const { job, leaseToken } = claimed;
-					this.#activeJobs.add(job.id);
-					try {
-						const key = this.#handlerKey(job.tenant_id, job.name);
-						const handler = this.#handlers.get(key);
-						if (!handler) {
-							this.#logger?.warn?.(
-								`No handler for cron job "${job.name}" (tenant: ${job.tenant_id}), using noop`
-							);
-						}
-						this.#logger?.debug?.(
-							`Executing cron job "${job.name}" (tenant: ${job.tenant_id})...`
-						);
-						await _executeCronJob(
-							this.#context,
-							job,
-							handler ?? noopHandler,
-							leaseToken,
-							shutdownSignal
-						);
-					} finally {
-						this.#activeJobs.delete(job.id);
-					}
-				} else {
-					await sleep(this.pollTimeoutMs, undefined, shutdownSignal);
-				}
+				claimed = await this.#withRetry(() => _claimNextCronJob(this.#context));
 
 				if (this.#claimErrorCounter) {
 					if (this.#claimErrorCounter >= limit) {
@@ -516,13 +531,57 @@ export class Cron {
 			} catch (e: unknown) {
 				this.#claimErrorCounter++;
 				if (this.#claimErrorCounter < limit) {
-					this.#logger?.error?.(`Cron claim: ${e instanceof Error ? e.stack ?? e.message : e}`);
+					this.#logger?.error?.(
+						`Cron claim: ${e instanceof Error ? e.stack ?? e.message : e}`
+					);
 				} else if (this.#claimErrorCounter === limit) {
 					this.#logger?.debug?.(`Cron claim error reporting MUTED...`);
 				}
-				// On a hard error, briefly pause to avoid a tight error loop —
-				// but stay responsive to shutdown.
-				await sleep(Math.min(this.pollTimeoutMs, 1_000), undefined, shutdownSignal);
+				await pause();
+				continue;
+			}
+
+			if (!claimed) {
+				await sleep(this.pollTimeoutMs, undefined, shutdownSignal);
+				continue;
+			}
+
+			const { job, leaseToken } = claimed;
+			this.#activeJobs.add(job.id);
+			try {
+				const key = this.#handlerKey(job.tenant_id, job.name);
+				const handler = this.#handlers.get(key);
+				if (!handler) {
+					this.#logger?.warn?.(
+						`No handler for cron job "${job.name}" (tenant: ${job.tenant_id}), using noop`
+					);
+				}
+				this.#logger?.debug?.(
+					`Executing cron job "${job.name}" (tenant: ${job.tenant_id})...`
+				);
+				await _executeCronJob(
+					this.#context,
+					job,
+					handler ?? noopHandler,
+					leaseToken,
+					shutdownSignal,
+					{
+						withRetry: <T>(fn: () => Promise<T>) => this.#withRetry(fn),
+						heartbeatIntervalMs: this.#heartbeatIntervalMs,
+					}
+				);
+			} catch (e: unknown) {
+				// Handler errors never reach here (they are recorded as failed
+				// attempts). This is the bookkeeping itself failing.
+				this.#logger?.error?.(
+					`Cron job "${job.name}" (tenant: ${job.tenant_id}): could not record the run; ` +
+						`the row stays "running" until cleanup() recovers it: ${
+							e instanceof Error ? e.stack ?? e.message : e
+						}`
+				);
+				await pause();
+			} finally {
+				this.#activeJobs.delete(job.id);
 			}
 		}
 
@@ -584,14 +643,30 @@ export class Cron {
 
 	async #doEnable(tenantId: string, name: string): Promise<CronJob> {
 		await this.#initializeOnce();
-		const { db, tableNames } = this.#context;
+		const ctx = this.#tenantContext(tenantId);
+		const { db, tableNames } = ctx;
 		const { tableCron } = tableNames;
+
+		// A tick that came due while the job was disabled is skipped, not
+		// deferred: re-enabling resumes at the next slot instead of firing at
+		// once for a run the caller had switched off. The CASE re-checks the
+		// conditions atomically, so enabling an already-enabled job that is
+		// merely due never loses that run.
+		const current = await _findByName(ctx, name);
+		const resumeAt = current && !current.enabled ? _nextRunAt(current, new Date()) : null;
+
 		const { rows } = await db.query(
 			`UPDATE ${tableCron}
-			SET enabled = TRUE, updated_at = NOW()
+			SET enabled     = TRUE,
+				next_run_at = CASE
+					WHEN enabled = FALSE AND next_run_at <= NOW() AND $3::timestamptz IS NOT NULL
+						THEN $3::timestamptz
+					ELSE next_run_at
+				END,
+				updated_at  = NOW()
 			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
-			[tenantId, name]
+			[tenantId, name, resumeAt]
 		);
 		return rows[0] as CronJob;
 	}
@@ -718,58 +793,55 @@ export class Cron {
 		skipIfExists: boolean
 	): Unsubscriber {
 		const names = Array.isArray(name) ? name : [name];
-		const unsubs: Unsubscriber[] = [];
 
 		// One wrap per (instance, cb). Wraps catch handler errors so they
 		// can't tear down the pubsub publish loop.
-		let wrapped = this.#eventWraps.get(cb);
-		if (!wrapped) {
-			wrapped = async (job: CronJob) => {
+		let entry = this.#eventWraps.get(cb);
+		if (!entry) {
+			const wrapped: Subscriber = async (job: CronJob) => {
 				try {
 					await cb(job);
 				} catch (e) {
 					this.#logger?.error?.(`onEvent ${job.name}: ${e}`);
 				}
 			};
-			this.#eventWraps.set(cb, wrapped);
+			entry = { wrapped, topics: new Set() };
+			this.#eventWraps.set(cb, entry);
 		}
-		const wrap = wrapped;
+		const { wrapped, topics } = entry;
+		const kind = pubsub === this.#pubsubDone ? "done" : "error";
+
+		// What THIS call subscribed — and therefore what its unsubscriber undoes.
+		const mine: Array<{ id: string; unsub: Unsubscriber }> = [];
 
 		names.forEach((n) => {
 			const key = this.#handlerKey(tenantId, n);
-			if (!skipIfExists || !pubsub.isSubscribed(key, wrap)) {
-				const unsub = pubsub.subscribe(key, wrap);
-				unsubs.push(unsub);
+			if (!skipIfExists || !pubsub.isSubscribed(key, wrapped)) {
+				const id = `${kind}\0${key}`;
+				mine.push({ id, unsub: pubsub.subscribe(key, wrapped) });
+				topics.add(id);
 			}
 		});
 
-		// Returned unsubscriber: detach all topics, then evict the wrap from
-		// the per-instance cache only when no subscriptions for this cb
-		// remain anywhere. This avoids the "first unsub kills the others"
-		// bug and the duplicate-wrap-on-resubscribe footgun.
+		// Returned unsubscriber: detach this call's topics, then evict the wrap
+		// from the per-instance cache only when no subscription for this cb
+		// remains anywhere. Tracked directly (not probed through the handler
+		// map), so it is exact for names that have no handler too.
 		const dispose = () => {
-			unsubs.forEach((u) => u());
-			const stillSubscribed =
-				this.#hasAnySubscription(this.#pubsubDone, wrap) ||
-				this.#hasAnySubscription(this.#pubsubError, wrap);
-			if (!stillSubscribed) this.#eventWraps.delete(cb);
+			for (const { id, unsub } of mine) {
+				unsub();
+				topics.delete(id);
+			}
+			mine.length = 0;
+			// `unsubscribeAll()` may have replaced the entry in the meantime
+			if (topics.size === 0 && this.#eventWraps.get(cb) === entry) {
+				this.#eventWraps.delete(cb);
+			}
 		};
 		const u = (() => dispose()) as Unsubscriber;
 		// deno-lint-ignore no-explicit-any
 		(u as any)[Symbol.dispose] = dispose;
 		return u;
-	}
-
-	#hasAnySubscription(
-		pubsub: ReturnType<typeof createPubSub>,
-		wrapped: Subscriber
-	): boolean {
-		// pubsub doesn't expose a "any topic?" query, so probe each key.
-		// In practice the handler map is small.
-		for (const key of this.#handlers.keys()) {
-			if (pubsub.isSubscribed(key, wrapped)) return true;
-		}
-		return false;
 	}
 
 	// --- Public: Handler management ---
@@ -821,50 +893,83 @@ export class Cron {
 	 * Processors are global — they claim any due job regardless of tenant.
 	 * One `start()` call serves all tenants.
 	 *
+	 * With a single `pg.Client` as `db` the count is clamped to 1 (see
+	 * `CronOptions.db`).
+	 *
 	 * @param processorsCount - Number of concurrent workers (default: 2)
+	 * @throws If the schema cannot be initialised, or if a `stop()` is still
+	 *   draining. Nothing is started in either case.
 	 */
 	async start(processorsCount: number = 2): Promise<void> {
-		try {
-			if (this.#isShuttingDown) {
-				const msg = `Cannot start (shutdown in progress detected)`;
-				this.#logger?.error?.(msg);
-				throw new Error(msg);
-			}
+		if (this.#stopsInFlight > 0) {
+			const msg = `Cannot start (shutdown in progress detected)`;
+			this.#logger?.error?.(msg);
+			throw new Error(msg);
+		}
 
+		try {
 			await this.#initializeOnce();
 
 			if (this.#healthMonitor) {
 				await this.#healthMonitor.start();
 				this.#logger?.debug?.("DB health monitoring started");
 			}
-
-			if (this.#autoCleanupConfig && !this.#autoCleanupTimer) {
-				const { intervalMs, maxAllowedRunDurationMinutes } = this.#autoCleanupConfig;
-				this.#autoCleanupTimer = setInterval(() => {
-					this.cleanup(maxAllowedRunDurationMinutes).catch((e) => {
-						this.#logger?.error?.(`Auto-cleanup failed: ${e}`);
-					});
-				}, intervalMs);
-				this.#logger?.debug?.(
-					`Auto-cleanup enabled (every ${intervalMs}ms, threshold ${maxAllowedRunDurationMinutes}min)`
-				);
-			}
 		} catch (e) {
 			this.#logger?.error?.(`Unable to start: ${e}`);
 			this.#logger?.error?.(`CRON NOT STARTED`);
-			return;
+			throw e;
 		}
 
-		this.#shutdownCtrl = new AbortController();
+		if (this.#autoCleanupConfig && !this.#autoCleanupTimer) {
+			const { intervalMs, maxAllowedRunDurationMinutes } = this.#autoCleanupConfig;
+			this.#autoCleanupTimer = setInterval(() => {
+				this.cleanup(maxAllowedRunDurationMinutes).catch((e) => {
+					this.#logger?.error?.(`Auto-cleanup failed: ${e}`);
+				});
+			}, intervalMs);
+			this.#logger?.debug?.(
+				`Auto-cleanup enabled (every ${intervalMs}ms, threshold ${maxAllowedRunDurationMinutes}min)`
+			);
+		}
 
-		for (let i = 0; i < processorsCount; i++) {
+		// Registered here rather than at schema init: `stop()` detaches it, so a
+		// later `start()` has to attach it again — and an instance that is only
+		// used for management calls should not touch the process's signals.
+		if (this.gracefulSigterm && !this.#sigtermListener) {
+			this.#sigtermListener = () => {
+				this.#logger?.debug?.(`SIGTERM detected...`);
+				void this.stop();
+			};
+			process.on("SIGTERM", this.#sigtermListener);
+		}
+
+		// A single `pg.Client` is ONE session. Concurrent processors would run
+		// their statements inside each other's open transactions (a rollback in
+		// one would undo another's claim), and pg@9 drops the client-side query
+		// queue that makes concurrent `client.query()` calls work at all.
+		let count = processorsCount;
+		if (!isPool(this.#db)) {
+			const allowed = Math.max(0, 1 - this.#jobProcessors.length);
+			if (count > allowed) {
+				this.#logger?.warn?.(
+					`A single pg.Client can serve only one processor; starting ${allowed} ` +
+						`instead of ${count}. Pass a pg.Pool to run concurrent processors.`
+				);
+				count = allowed;
+			}
+		}
+
+		// Reuse the controller if already running, so that one `stop()` reaches
+		// every processor of this generation.
+		this.#shutdownCtrl ??= new AbortController();
+		const shutdownSignal = this.#shutdownCtrl.signal;
+
+		for (let i = 0; i < count; i++) {
 			const processorId = `cron-processor-${i}`;
-			const processor = this.#processJobs(processorId);
+			const processor = this.#processJobs(processorId, shutdownSignal);
 			this.#jobProcessors.push(processor);
 		}
-		this.#logger?.debug?.(
-			`Cron processors initialized (count: ${processorsCount})...`
-		);
+		this.#logger?.debug?.(`Cron processors initialized (count: ${count})...`);
 	}
 
 	/**
@@ -872,67 +977,69 @@ export class Cron {
 	 *
 	 * Waits for in-flight jobs to finish, but no longer than `drainTimeoutMs`
 	 * (default: 30 s). Pass `0` to wait forever.
+	 *
+	 * Once it returns the instance can be started again — also after the drain
+	 * cap was hit: the abandoned processors belong to the stopped generation and
+	 * exit as soon as their handler returns, without claiming anything new.
 	 */
 	async stop(options: CronStopOptions = {}): Promise<void> {
 		const drainTimeoutMs = options.drainTimeoutMs ?? 30_000;
 
-		if (this.#autoCleanupTimer) {
-			clearInterval(this.#autoCleanupTimer);
-			this.#autoCleanupTimer = null;
-		}
+		// `start()` is refused for as long as any `stop()` call is draining, so
+		// the state below cannot change under a concurrent `stop()` (e.g. the
+		// built-in SIGTERM listener racing the application's own handler).
+		this.#stopsInFlight++;
+		try {
+			if (this.#autoCleanupTimer) {
+				clearInterval(this.#autoCleanupTimer);
+				this.#autoCleanupTimer = null;
+			}
 
-		if (this.#healthMonitor) {
-			this.#healthMonitor.stop();
-			this.#logger?.debug?.("DB health monitoring stopped");
-		}
+			if (this.#healthMonitor) {
+				this.#healthMonitor.stop();
+				this.#logger?.debug?.("DB health monitoring stopped");
+			}
 
-		this.#isShuttingDown = true;
-		// Tell processors to wake from sleep + handlers to abort their work
-		this.#shutdownCtrl?.abort();
-
-		// Race the processor wait against the drain cap. Processors block on
-		// the in-flight `await _executeCronJob(...)` until that promise
-		// settles — which may be never if a handler ignores its AbortSignal.
-		const processorsDone = Promise.all(this.#jobProcessors).then(() => true);
-		let allDone: boolean;
-		if (drainTimeoutMs > 0) {
-			const drainCtrl = new AbortController();
-			const cap = sleep(drainTimeoutMs, undefined, drainCtrl.signal).then(
-				() => false
-			);
-			allDone = await Promise.race([processorsDone, cap]);
-			// If processors won the race, abort the cap sleep so its timer is cleared.
-			if (allDone) drainCtrl.abort();
-		} else {
-			allDone = await processorsDone;
-		}
-
-		if (!allDone) {
-			this.#logger?.error?.(
-				`Drain timeout (${drainTimeoutMs}ms) exceeded; ` +
-					`abandoning ${this.#activeJobs.size} in-flight job(s): ` +
-					`[${[...this.#activeJobs].join(", ")}]`
-			);
-			// Abandoned processors are still running. We deliberately leave
-			// `#isShuttingDown = true` so that as soon as their stuck handler
-			// finally returns, the loop body sees the flag and exits — without
-			// claiming any *new* jobs. The instance is not safe to re-`start()`
-			// until those processors drain in the background.
-		}
-		this.#jobProcessors = [];
-
-		// Detach SIGTERM listener so the Cron instance is GC-eligible
-		if (this.#sigtermListener) {
-			process.off("SIGTERM", this.#sigtermListener);
-			this.#sigtermListener = null;
-		}
-
-		// Only fully reset state when processors actually exited. Otherwise we
-		// leave the abort signal connected and `#isShuttingDown` true so the
-		// orphaned processor loop terminates cleanly when its handler returns.
-		if (allDone) {
+			// Ends this generation: wakes processors from sleep, makes their loops
+			// exit, and tells handlers to abort their work.
+			this.#shutdownCtrl?.abort();
 			this.#shutdownCtrl = null;
-			this.#isShuttingDown = false;
+
+			// Race the processor wait against the drain cap. Processors block on
+			// the in-flight `await _executeCronJob(...)` until that promise
+			// settles — which may be never if a handler ignores its AbortSignal.
+			const processorsDone = Promise.all(this.#jobProcessors).then(() => true);
+			let allDone: boolean;
+			if (drainTimeoutMs > 0) {
+				const drainCtrl = new AbortController();
+				const cap = sleep(drainTimeoutMs, undefined, drainCtrl.signal).then(
+					() => false
+				);
+				allDone = await Promise.race([processorsDone, cap]);
+				// If processors won the race, abort the cap sleep so its timer is cleared.
+				if (allDone) drainCtrl.abort();
+			} else {
+				allDone = await processorsDone;
+			}
+
+			if (!allDone) {
+				// The abandoned processors keep running until their stuck handler
+				// returns; their (aborted) signal then ends the loop.
+				this.#logger?.error?.(
+					`Drain timeout (${drainTimeoutMs}ms) exceeded; ` +
+						`abandoning ${this.#activeJobs.size} in-flight job(s): ` +
+						`[${[...this.#activeJobs].join(", ")}]`
+				);
+			}
+			this.#jobProcessors = [];
+
+			// Detach SIGTERM listener so the Cron instance is GC-eligible
+			if (this.#sigtermListener) {
+				process.off("SIGTERM", this.#sigtermListener);
+				this.#sigtermListener = null;
+			}
+		} finally {
+			this.#stopsInFlight--;
 		}
 	}
 
@@ -993,6 +1100,9 @@ export class Cron {
 	/**
 	 * Enables a previously disabled cron job.
 	 *
+	 * If its `next_run_at` passed while it was disabled, the schedule resumes at
+	 * the next slot — the job does not fire immediately for the tick it missed.
+	 *
 	 * @returns The updated CronJob row
 	 */
 	async enable(name: string): Promise<CronJob> {
@@ -1052,6 +1162,10 @@ export class Cron {
 	 *
 	 * When called on a `Cron` instance: recovers ALL stuck jobs globally.
 	 * When called on a `CronTenantScope`: recovers only that tenant's jobs.
+	 *
+	 * A job counts as stuck when its worker has not been heard from (claim or
+	 * heartbeat) for longer than the threshold — so a live worker on a long job
+	 * is left alone. Keep the threshold at 3x `heartbeatIntervalMs` or more.
 	 *
 	 * @param maxAllowedRunDurationMinutes - Threshold in minutes (default: 5)
 	 * @returns The number of rows recovered
@@ -1215,6 +1329,9 @@ export class Cron {
 	 *   indexes) to `tenant_id` in place when present, preserving existing data
 	 * - v1 → v2: adds `tenant_id` and updates indexes
 	 * - v2 → v3: adds `lease_token`, `timezone`, and CHECK constraints
+	 * - data repair: re-stamps run-log rows whose `tenant_id` differs from their
+	 *   job's (written by releases that logged every run under the instance's
+	 *   own tenant)
 	 *
 	 * Safe to call multiple times — uses `IF NOT EXISTS` / `IF EXISTS`,
 	 * existence-guarded renames, and idempotent CHECK additions.
@@ -1303,6 +1420,18 @@ export class Cron {
 
 				CREATE INDEX IF NOT EXISTS idx_${safe(tableCronRunLog)}_tenant_id
 					ON ${tableCronRunLog}(tenant_id);
+			`);
+
+			// Data repair: earlier releases stamped every run-log row with the
+			// tenant of the Cron instance that executed it, not the job's. The
+			// FK makes the owning job unambiguous, so re-stamp from it. A no-op
+			// once repaired.
+			await client.query(`
+				UPDATE ${tableCronRunLog} AS l
+				SET tenant_id = c.tenant_id
+				FROM ${tableCron} AS c
+				WHERE c.id = l.cron_id
+				  AND l.tenant_id IS DISTINCT FROM c.tenant_id;
 			`);
 
 			// v2 → v3: lease token + timezone

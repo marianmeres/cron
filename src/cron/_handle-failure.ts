@@ -1,4 +1,3 @@
-import { CronParser } from "@marianmeres/cron-parser";
 import {
 	BACKOFF_STRATEGY,
 	CRON_STATUS,
@@ -6,6 +5,7 @@ import {
 	type CronContext,
 	type CronJob,
 } from "./cron.ts";
+import { _nextRunAt } from "./_next-run.ts";
 import { withTx } from "./utils/with-tx.ts";
 
 /** Default cap on inter-attempt exponential backoff. */
@@ -17,9 +17,10 @@ export const DEFAULT_MAX_BACKOFF_MS = 5 * 60 * 1_000; // 5 minutes
  * Cron jobs are always recurring — even on failure the job returns to `idle`
  * with a new `next_run_at` so it will be retried on the next scheduled cycle.
  *
- * Uses `scheduledAt` for drift-safe `next_run_at` recalculation. Wrapped in a
- * real transaction (single pg connection) so the row update is committed
- * atomically. Run log entries are already written per-attempt by the caller.
+ * `next_run_at` comes from `_nextRunAt` (schedule-relative, in the job's
+ * timezone, missed ticks skipped). Wrapped in a real transaction (single pg
+ * connection) so the row update is committed atomically. Run log entries are
+ * already written per-attempt by the caller.
  *
  * The `WHERE` clause checks `lease_token` so a stale-recovered job does not
  * overwrite a fresh execution.
@@ -34,7 +35,7 @@ export async function _handleCronFailure(
 	const { tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const nextRunAt = new CronParser(job.expression).getNextRun(scheduledAt);
+	const nextRunAt = _nextRunAt(job, scheduledAt);
 	const runStatus = isTimeout ? RUN_STATUS.TIMEOUT : RUN_STATUS.ERROR;
 
 	return await withTx(context.db, async (client) => {

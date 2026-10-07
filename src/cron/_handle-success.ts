@@ -1,6 +1,6 @@
-import { CronParser } from "@marianmeres/cron-parser";
 import { CRON_STATUS, RUN_STATUS, type CronContext, type CronJob } from "./cron.ts";
 import { _logRunSuccess } from "./_log-run.ts";
+import { _nextRunAt } from "./_next-run.ts";
 import { withTx } from "./utils/with-tx.ts";
 
 /**
@@ -9,8 +9,8 @@ import { withTx } from "./utils/with-tx.ts";
  * In a single real transaction (one physical pg connection):
  * 1. Sets the job back to `idle` (only if `lease_token` still matches —
  *    a stale-recovered job will silently no-op here)
- * 2. Advances `next_run_at` using `scheduledAt` (drift-safe: relative to the
- *    intended schedule, not the actual wall clock time of completion)
+ * 2. Advances `next_run_at` via `_nextRunAt` (relative to the intended
+ *    schedule and in the job's timezone; missed ticks are skipped)
  * 3. Finalises the run log entry
  *
  * @param scheduledAt - The `next_run_at` captured at claim time
@@ -29,8 +29,7 @@ export async function _handleCronSuccess(
 	const { tableNames } = context;
 	const { tableCron } = tableNames;
 
-	// Compute next run relative to the scheduled time to prevent drift
-	const nextRunAt = new CronParser(job.expression).getNextRun(scheduledAt);
+	const nextRunAt = _nextRunAt(job, scheduledAt);
 
 	return await withTx(context.db, async (client) => {
 		const params: unknown[] = [

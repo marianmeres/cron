@@ -7,8 +7,9 @@
 PostgreSQL-backed recurring cron job scheduler. Concurrent workers via
 `FOR UPDATE SKIP LOCKED`, drift-safe scheduling, real transactions on `pg.Pool`,
 per-claim lease tokens (so stale-recovered jobs cannot clobber fresh
-results), retries with capped exponential backoff, per-attempt timeouts with
-`AbortSignal` cancellation, IANA timezone-aware schedules, tenant-scoped
+results) kept alive by a heartbeat (so long-running jobs are not mistaken for
+crashed ones), retries with capped exponential backoff, per-attempt timeouts
+with `AbortSignal` cancellation, IANA timezone-aware schedules, tenant-scoped
 isolation, and an optional task registry for UI-driven job management.
 
 ## Installation
@@ -116,6 +117,19 @@ await cron.register(
 );
 ```
 
+### Missed runs
+
+A tick that could not run on time is **not** replayed later. After every run the
+next slot is derived from the job's schedule, and if that slot is already in the
+past the job resumes at the first future one:
+
+- **The process was down** across several slots: the job runs once on startup
+  (for the slot it was waiting on), then continues on schedule.
+- **A run outlasted its own interval** (a 90 s handler on a per-minute job): the
+  ticks it overran are skipped.
+- **The job was disabled** while a slot came due: `enable()` resumes at the next
+  slot. It does not fire immediately for the tick that passed.
+
 ### Concurrent workers (multiple processes)
 
 Multiple `Cron` instances sharing the same PostgreSQL database safely co-exist —
@@ -131,10 +145,25 @@ await cron.register("job", "* * * * *", handler);
 await cron.start(1);
 ```
 
+Pass a `pg.Pool`. A single `pg.Client` is one database session, so `start()`
+runs at most **one** processor on it, whatever count you ask for.
+
+`start()` rejects if the schema cannot be initialised — nothing is started in
+that case, so handle the rejection the way you would any failed boot step.
+
 ### Maintenance
 
 Stuck `running` jobs (process crashes mid-execution) are recovered by
-`cleanup()`. Wire it up in one of two ways:
+`cleanup()`. A worker renews its claim every `heartbeatIntervalMs` (default
+30 s) for as long as it is executing, so the threshold below means "no sign of
+life for this long", not "ran for this long": a job may legitimately run for
+hours without being handed to a second worker. Keep the threshold at three
+heartbeats or more.
+
+The flip side: a handler that hangs forever in a live process keeps its claim.
+Give such jobs a `max_attempt_duration_ms`.
+
+Wire `cleanup()` up in one of two ways:
 
 ```typescript
 // Option A — built-in timer (recommended)
@@ -252,8 +281,44 @@ await Cron.migrate(db, "myschema.");
 
 It renames a legacy `project_id` column (and its indexes) to `tenant_id` **in
 place**, preserving existing data; adds missing columns (`tenant_id`,
-`lease_token`, `timezone`); adjusts indexes; and adds CHECK constraints. Safe to
-call multiple times.
+`lease_token`, `timezone`); adjusts indexes; and adds CHECK constraints. It also
+repairs run-log rows that 3.2 and earlier stamped with the wrong `tenant_id`
+(see below). Safe to call multiple times.
+
+## Behaviour changes since 3.2
+
+No schema change. Running `Cron.migrate(db)` is optional and only repairs old
+run-log rows (second bullet).
+
+- **Fixed: a job's `timezone` was ignored after its first run.** Only the first
+  `next_run_at` was computed in the job's zone; every later one used the host's.
+  An affected job fires once more at its wrong time and is then scheduled
+  correctly; re-register it with `forceNextRunRecalculate: true` to correct it
+  at once.
+- **Fixed: run-log rows were stamped with the Cron instance's tenant instead of
+  the job's.** Tenant-scoped `healthPreview()` and `pruneRunLog()` therefore saw
+  nothing (or everything, for the default tenant). New rows are correct;
+  `Cron.migrate(db)` re-stamps the old ones.
+- **Missed ticks are skipped, not replayed** — see [Missed runs](#missed-runs).
+  Previously a job replayed every tick it had missed, back-to-back. `enable()`
+  now resumes a paused job at its next slot.
+- **`start()` rejects** when the schema cannot be initialised or a `stop()` is
+  still draining. It used to log and resolve, leaving a silently dead scheduler.
+- **`stop()` always leaves a restartable instance**, also after the drain cap
+  was hit. Calling `stop()` twice after a capped drain no longer revives the
+  abandoned processor.
+- **Heartbeat** (new `heartbeatIntervalMs` option, default 30 s): a job running
+  longer than the stale threshold is no longer re-claimed and run concurrently.
+  `CronJob.last_run_at` is now "last sign of life" while a job is running.
+- **Shutdown stops retries.** Remaining attempts of a failing job are abandoned
+  once `stop()` is called; the cycle is recorded as failed.
+- **`dbRetry` also covers the writes that record a run.** A failure to record a
+  result is logged as such and is never counted as a handler failure.
+- **A single `pg.Client` runs at most one processor.**
+- **The SIGTERM listener is attached by `start()`** (not on first use) and is
+  re-attached after a `stop()` / `start()` cycle.
+- **`healthPreview()` returns real numbers** for `count` and
+  `avg_duration_seconds` (they were strings at runtime, despite the types).
 
 ## Breaking changes in 3.2
 

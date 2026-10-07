@@ -13,7 +13,7 @@
 		"rpm": "deno task release minor -y && deno task publish"
 	},
 	"imports": {
-		"@marianmeres/clog": "jsr:@marianmeres/clog@^3.21.0",
+		"@marianmeres/clog": "jsr:@marianmeres/clog@^3.23.0",
 		"@marianmeres/cron-parser": "jsr:@marianmeres/cron-parser@^1.0.1",
 		"@marianmeres/modelize": "jsr:@marianmeres/modelize@^3.0.0",
 		"@marianmeres/npmbuild": "jsr:@marianmeres/npmbuild@^1.16.0",
@@ -22,7 +22,7 @@
 		"@std/fs": "jsr:@std/fs@^1.0.24",
 		"@std/path": "jsr:@std/path@^1.1.6",
 		"@types/pg": "npm:@types/pg@^8.23.1",
-		"pg": "npm:pg@^8.23.0"
+		"pg": "npm:pg@^8.23.1"
 	},
 	"fmt": {
 		"useTabs": true,

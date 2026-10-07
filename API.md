@@ -10,14 +10,15 @@ const cron = new Cron(options: CronOptions);
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `db` | `pg.Pool \| pg.Client` | required | PostgreSQL connection |
+| `db` | `pg.Pool \| pg.Client` | required | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` is limited to one processor (see `start()`) |
 | `tenantId` | `string` | `"_default"` | Tenant scope identifier — isolates all jobs to this tenant |
 | `tablePrefix` | `string` | `""` | Prefix for table names (e.g. `"myschema."`) |
 | `pollTimeoutMs` | `number` | `1000` | Poll interval when no jobs are due (ms) |
-| `gracefulSigterm` | `boolean` | `true` | Register SIGTERM handler for graceful shutdown |
+| `gracefulSigterm` | `boolean` | `true` | Register SIGTERM handler for graceful shutdown. Attached by `start()`, detached by `stop()` |
 | `logger` | `Logger` | `clog("cron")` | Logger instance |
-| `dbRetry` | `DbRetryOptions \| boolean` | — | Enable retry on transient DB errors |
+| `dbRetry` | `DbRetryOptions \| boolean` | — | Enable retry on transient DB errors. Covers the claim query and the writes that record a run's outcome |
 | `dbHealthCheck` | `boolean \| object` | — | Enable DB health monitoring |
+| `heartbeatIntervalMs` | `number` | `30000` | How often a worker renews the claim of the job it is executing (bumps `last_run_at`), so a long-running job is not treated as crashed. Keep it at a third of the stale threshold or less. `0` disables |
 | `autoCleanup` | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | — | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`) |
 
 #### Tenant scoping
@@ -51,11 +52,19 @@ Initialises the schema (idempotent) and starts N polling workers. Processors are
 await cron.start(2); // 2 concurrent workers (default)
 ```
 
+**Rejects** if the schema cannot be initialised, or if a `stop()` is still draining. Nothing is started in either case.
+
+With a single `pg.Client` as `db` the count is clamped to **1** (a warning is logged): a client is one session, so concurrent processors would run their statements inside each other's transactions. Pass a `pg.Pool` to run several.
+
 #### `cron.stop(options?: { drainTimeoutMs?: number }): Promise<void>`
 
 Gracefully stops all workers. Aborts the per-execution `AbortSignal` so handlers that honour it can cancel their work.
 
 `drainTimeoutMs` (default: **30 000 ms**) caps how long `stop()` waits for in-flight handlers to drain. Pass `0` to wait forever (legacy behaviour). When the cap is exceeded, in-flight job IDs are logged at error level and `stop()` returns; the orphaned executions continue in the background but cannot claim new work.
+
+Once `stop()` has returned the instance can be `start()`-ed again — also after a capped drain.
+
+A failing job's remaining retry attempts are abandoned on `stop()`; the cycle is recorded as failed.
 
 #### `cron.resetHard(): Promise<void>`
 
@@ -110,6 +119,8 @@ const job = await cron.register("backup", "0 2 * * *", async (job, signal) => {
 });
 ```
 
+> **Missed runs:** after each run the next slot is derived from the job's schedule (in its `timezone`). If that slot is already in the past — the process was down, or the run outlasted its interval — the missed ticks are **skipped** and the job resumes at the first future slot. Nothing is replayed.
+
 #### `cron.unregister(name: string): Promise<void>`
 
 Hard-deletes a job and its run log from the database (scoped to tenant). Also removes the in-memory handler.
@@ -141,6 +152,8 @@ Returns the job names of all in-memory handlers in the current tenant.
 #### `cron.enable(name: string): Promise<CronJob>`
 
 Enables a disabled job (scoped to tenant). Returns the updated row.
+
+If the job's `next_run_at` passed while it was disabled, it is moved to the next slot — the job does not fire immediately for the tick it missed. Calling `enable()` on a job that is already enabled never changes its schedule.
 
 #### `cron.disable(name: string): Promise<CronJob>`
 
@@ -178,6 +191,8 @@ Returns the execution log for a job, newest first.
 #### `cron.cleanup(maxAllowedRunDurationMinutes?: number): Promise<number>`
 
 Resets stuck `running` jobs back to `idle` (crash recovery). Default threshold: 5 minutes. Returns the number of rows recovered.
+
+A job is stuck when its worker has shown no sign of life — claim or heartbeat (`heartbeatIntervalMs`) — for longer than the threshold. The threshold is therefore not a cap on run time: a live worker keeps its claim however long the job takes, and only a dead one loses it. Keep the threshold at three heartbeats or more. A handler that hangs in a live process keeps its claim too — bound it with `max_attempt_duration_ms`.
 
 When recovering a stuck row, the row's `lease_token` is cleared. If the original (still-alive) worker later writes a result, its `WHERE id = $ AND lease_token = $` predicate fails — preventing it from clobbering whatever fresh execution has happened in the meantime.
 
@@ -287,6 +302,7 @@ Idempotent schema migration. Brings any prior schema up to current. Safe to call
 - **Legacy `project_id` → `tenant_id`**: renames the old column (and its indexes) in place when present, preserving existing data.
 - **v1 → v2**: adds the `tenant_id` column and reshapes indexes.
 - **v2 → v3**: adds `lease_token` and `timezone` columns plus CHECK constraints.
+- **Data repair**: re-stamps run-log rows whose `tenant_id` differs from their job's (3.2 and earlier logged every run under the instance's own tenant).
 
 The migration runs in a real transaction (single connection — works against `pg.Pool`).
 
@@ -428,7 +444,7 @@ interface CronJob {
   enabled: boolean;
   status: "idle" | "running";
   next_run_at: Date;
-  last_run_at: Date | null;
+  last_run_at: Date | null;            // last sign of life: claim, heartbeat, or completion
   last_run_status: "success" | "error" | "timeout" | null;
   lease_token: string | null;          // per-claim fence (UUID)
   max_attempts: number;

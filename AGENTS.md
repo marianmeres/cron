@@ -22,25 +22,32 @@ src/
     _schema.ts            — CREATE/DROP tables (_initialize, _uninstall) — uses withTx
     _register.ts          — UPSERT job row (keyed on tenant_id + name); takes timezone
     _claim-next.ts        — FOR UPDATE SKIP LOCKED atomic claim; issues lease_token
-    _execute.ts           — retry loop, timeout, success/failure dispatch; passes AbortSignal to handler
-    _handle-success.ts    — drift-safe next_run_at after success; real TX via withTx; lease_token fence
-    _handle-failure.ts    — drift-safe next_run_at after all attempts fail; real TX; lease_token fence
+    _execute.ts           — retry loop, timeout, success/failure dispatch; passes AbortSignal to handler;
+                            re-scopes the context to the job's tenant; runs the heartbeat
+    _next-run.ts          — _nextRunAt(): THE next_run_at computation (schedule-relative, tz, missed ticks skipped)
+    _heartbeat.ts         — _startHeartbeat(): renews last_run_at while lease_token matches; reports lease loss
+    _handle-success.ts    — next_run_at via _nextRunAt after success; real TX via withTx; lease_token fence
+    _handle-failure.ts    — next_run_at via _nextRunAt after all attempts fail; real TX; lease_token fence
                             also exports _backoffMs and DEFAULT_MAX_BACKOFF_MS (5 min)
     _find.ts              — _findByName, _fetchAll (tenant-scoped, fully parameterised)
     _log-run.ts           — run log CRUD + _logRunPrune
-    _mark-stale.ts        — crash recovery: reset stuck RUNNING jobs (clears lease_token)
+    _mark-stale.ts        — crash recovery: reset RUNNING jobs with no recent sign of life (clears lease_token)
     _health-preview.ts    — aggregate stats from run log (tenant-scoped)
     utils/
       sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ for Deno hygiene + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
-      with-tx.ts          — withTx(db, async (client) => …) — works on Pool AND Client
+      with-tx.ts          — withTx(db, async (client) => …) — works on Pool AND Client; exports isPool()
+      unref-timer.ts      — unrefTimer(): Node/Bun .unref() or Deno.unrefTimer()
       with-db-retry.ts    — withDbRetry() with exponential backoff
       db-health.ts        — DbHealthMonitor, checkDbHealth()
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
 tests/
-  _pg.ts                  — createPg() from TEST_PG_* env vars
+  _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
   cron-db.test.ts         — 33 integration tests (requires DB, includes tenant_id scoping + legacy migration)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
+  cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
+                            shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
+                            heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 ```
 
@@ -60,13 +67,20 @@ Management operations (register, unregister, find, fetchAll, enable, disable, he
 
 When adding new management queries, always include `tenant_id` in WHERE clauses. When adding processor-level logic, do NOT filter by `tenant_id`.
 
-### 2. Drift-safe scheduling (INVARIANT — never break this)
+Processors hand `_executeCronJob` the instance's **root** context. `_executeCronJob` re-scopes it to `job.tenant_id` before any write — the job row, never `context.tenantId`, decides which tenant a run-log row belongs to. Anything written on behalf of a claimed job must use that re-scoped context.
 
-Both `_handle-success.ts` and `_handle-failure.ts` MUST compute:
-```typescript
-const nextRunAt = new CronParser(job.expression, { timezone: job.timezone ?? undefined }).getNextRun(scheduledAt);
-```
-where `scheduledAt = job.next_run_at` captured at the START of `_executeCronJob`, BEFORE the claim UPDATE changes anything. The claim UPDATE (`_claim-next.ts`) deliberately does NOT touch `next_run_at`.
+### 2. Next-run computation (INVARIANT — never break this)
+
+`_nextRunAt(job, scheduledAt)` in `_next-run.ts` is the only place `next_run_at` is computed after a run. Both `_handle-success.ts` and `_handle-failure.ts` MUST call it — never build a `CronParser` there directly. It applies, in order:
+
+1. **Schedule-relative, in the job's timezone**: `new CronParser(job.expression, { timezone: job.timezone ?? undefined }).getNextRun(scheduledAt)`. Dropping the `timezone` option silently reschedules in host local time.
+2. **Never in the past**: if that slot is `< now`, return `getNextRun(now)` instead. Missed ticks are skipped, not replayed.
+
+`scheduledAt = job.next_run_at` captured at the START of `_executeCronJob`, BEFORE the claim UPDATE changes anything. The claim UPDATE (`_claim-next.ts`) deliberately does NOT touch `next_run_at`.
+
+Do not "simplify" this to `getNextRun(now)`: a worker whose clock lags the DB would recompute the slot it has just run and fire it twice.
+
+`enable()` applies the same rule at the management layer: a job that was disabled and whose `next_run_at` passed meanwhile is moved to the next slot (atomic `CASE` in the UPDATE; a no-op for an already-enabled job).
 
 ### 3. Real transactions on `pg.Pool` (CRITICAL)
 
@@ -89,15 +103,21 @@ Currently used in:
 
 Inner helpers (`_logRunSuccess`, `_logRunError`, `_logRunStart`) accept an optional `client?` parameter — pass `client` for the transactional path, omit for autocommit.
 
+A single `pg.Client` is one session: every statement issued on it while a `withTx` is open lands inside that transaction. Hence `start()` clamps a `pg.Client` to **one** processor (`isPool()` check, logs a warning). `pg.Pool` is the supported path for concurrency.
+
 ### 4. Lease token fence (CRITICAL for stale recovery)
 
 `_claim-next.ts` issues a fresh `lease_token UUID` per claim. `_mark-stale.ts` clears the column on stale recovery. `_handle-success.ts` / `_handle-failure.ts` add `AND lease_token = $` to their UPDATE — so an orphaned worker (whose lease was cleared by cleanup) cannot clobber a fresh claim's result.
 
 When introducing new write paths against a claimed row, include the lease check.
 
+**Heartbeat.** The fence protects the *write*; the heartbeat protects the *execution*. `_startHeartbeat` (started and stopped by `_executeCronJob`, spanning the whole retry cycle) bumps `last_run_at` every `heartbeatIntervalMs` (default 30 s, `0` = off) `WHERE lease_token = $`. `_markStale` measures from `last_run_at`, so its threshold means "silent for N minutes", not "running for N minutes" — a live worker on a long job is never re-claimed. A beat that matches no row means the lease is lost: beating stops, the attempt's `AbortSignal` is aborted, remaining retries are skipped. The timer is unref'd (`unrefTimer`) so it never keeps the process alive. A hung handler in a live process keeps beating — bounding it is `max_attempt_duration_ms`'s job.
+
 ### 5. AbortSignal propagation
 
-`Cron.start()` creates an `AbortController` (`#shutdownCtrl`); `stop()` aborts it. `_executeCronJob` derives a per-attempt controller wired to the shutdown signal AND to the `withTimeout` controller. The handler signature is `(job, signal?)` — the signal aborts on either timeout or shutdown. `sleep()` accepts an optional `signal` so it returns early on abort.
+`Cron.start()` creates an `AbortController` (`#shutdownCtrl`); `stop()` aborts it. `_executeCronJob` derives a per-attempt controller wired to the shutdown signal AND to the `withTimeout` controller. The handler signature is `(job, signal?)` — the signal aborts on timeout, shutdown, or lease loss. `sleep()` accepts an optional `signal` so it returns early on abort.
+
+An already-aborted signal never fires `"abort"` again: check `signal.aborted` before `addEventListener` (as `_executeCronJob` does), or the listener silently never runs.
 
 When adding any wait inside a processor loop or handler chain, plumb the relevant signal through.
 
@@ -112,6 +132,10 @@ Jobs toggle between `idle ↔ running` only. There are no terminal states in the
 ### 8. Retry scope
 
 `max_attempts` = retries within ONE execution cycle (the `for` loop in `_execute.ts`). Each retry logs a separate run log entry. After all attempts fail, `_handleCronFailure` advances the schedule. Backoff between attempts uses `_backoffMs(strategy, attempt, maxMs?)`, clamped at `DEFAULT_MAX_BACKOFF_MS` (5 min) for `"exp"`.
+
+The first attempt always runs. Attempts 2+ are skipped once the shutdown signal is aborted or the lease is lost; the cycle then ends through `_handleCronFailure`.
+
+**Handler errors vs bookkeeping errors.** Only an error thrown by the handler is a failed attempt. The handler call sits in its own `try`; the DB writes that record the outcome (`_logRunStart`, `_handleCronSuccess`, `_logRunError`, `_handleCronFailure`) sit outside it, wrapped in `options.withRetry` (the `dbRetry`-aware wrapper from `Cron`). If one of them still fails, `_executeCronJob` throws; the processor logs "could not record the run" and the row stays `running` until `cleanup()`. Never move those writes back inside the handler's `try` — a DB blip after a successful handler would be logged as a handler error and the handler re-run.
 
 ### 9. Table prefix
 
@@ -135,15 +159,23 @@ The `CronParser.matches()` function uses **OR** when both DoM and DoW fields are
 
 ### 14. Event handler wraps (per-instance, no leaks)
 
-`#eventWraps: Map<cb, Subscriber>` is a per-instance cache (not static). Wraps are evicted only when no subscriptions for the cb remain across either pubsub. The returned `Unsubscriber` is constructed to satisfy `pubsub@3`'s interface (callable + `Symbol.dispose`).
+`#eventWraps: Map<cb, { wrapped, topics }>` is a per-instance cache (not static). `topics` is the set of the wrap's live subscriptions (`${"done"|"error"}\0${handlerKey}`), maintained on subscribe / unsubscribe; the wrap is evicted when it empties. Do not derive "still subscribed?" from the `#handlers` map — subscriptions exist for names that have no handler. The returned `Unsubscriber` is constructed to satisfy `pubsub@3`'s interface (callable + `Symbol.dispose`).
 
-### 15. `stop()` drain cap
+### 15. Lifecycle: `start()` / `stop()`
 
-`stop({ drainTimeoutMs: 30_000 })` (default) races processor exit against a cap. If the cap wins, in-flight job IDs are logged at error level, `#isShuttingDown` stays `true`, and the orphaned processors will exit cleanly when their handler eventually returns (without claiming new jobs). The instance is not safe to `start()` again until those drain.
+**Generations.** Each `start()` → `stop()` span is one generation with its own `AbortController`. A processor loop runs `while (!shutdownSignal.aborted)` on the signal it was *started* with — never on instance state. `stop()` aborts the controller and drops it; the next `start()` creates a fresh one (a second `start()` without a `stop()` reuses the live one, so a single `stop()` reaches every processor).
+
+**`start()` rejects** (after logging) when schema init fails or while any `stop()` is draining (`#stopsInFlight > 0`). It attaches the SIGTERM listener (`gracefulSigterm`); `stop()` detaches it. Nothing at init time touches process signals.
+
+**Drain cap.** `stop({ drainTimeoutMs: 30_000 })` (default) races processor exit against a cap. If the cap wins, in-flight job IDs are logged at error level and `stop()` returns. The abandoned processors belong to the stopped generation: when their handler returns they record the run and exit without claiming anything. The instance is immediately safe to `start()` again.
+
+Concurrent `stop()` calls (built-in SIGTERM listener + the app's own) each wait for the same processors.
 
 ### 16. Auto-cleanup
 
 `new Cron({ db, autoCleanup: true })` (or `{ intervalMs?, maxAllowedRunDurationMinutes? }`) starts a `setInterval` on `start()` that calls `cleanup()` at the configured cadence and clears the timer on `stop()`.
+
+`maxAllowedRunDurationMinutes` is the heartbeat-silence threshold (see #4), not a run-time cap. Keep it ≥ 3× `heartbeatIntervalMs`.
 
 ### 17. Task Registry
 
@@ -169,8 +201,8 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 | payload | JSONB | default `{}` |
 | enabled | BOOLEAN | default TRUE |
 | status | VARCHAR(20) | `idle \| running` (CHECK constraint) |
-| next_run_at | TIMESTAMPTZ | drift-safe scheduled time |
-| last_run_at | TIMESTAMPTZ | wall-clock time of last claim |
+| next_run_at | TIMESTAMPTZ | scheduled slot; only ever computed by `_register` / `_nextRunAt` |
+| last_run_at | TIMESTAMPTZ | last sign of life: claim, heartbeat, or completion — what stale recovery measures |
 | last_run_status | VARCHAR(20) | `success \| error \| timeout \| null` (CHECK) |
 | lease_token | UUID | per-claim fence; cleared on success/failure/stale |
 | max_attempts | INTEGER | default 1 (CHECK >= 1) |
@@ -188,7 +220,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 | id | SERIAL PK | |
 | cron_id | INTEGER FK | ON DELETE CASCADE |
 | cron_name | VARCHAR(255) | |
-| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
+| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default'; always the job's `tenant_id` |
 | scheduled_at | TIMESTAMPTZ | next_run_at captured at claim time |
 | started_at | TIMESTAMPTZ | |
 | completed_at | TIMESTAMPTZ | nullable |
@@ -209,6 +241,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 - legacy → current: rename the pre-rename `project_id` column + its indexes to `tenant_id` in place (guarded `DO` block + `ALTER INDEX IF EXISTS`); preserves data. The only place the legacy `project_id` literal is still allowed to appear.
 - v1 → v2: add `tenant_id` columns + reshape indexes
 - v2 → v3: add `lease_token` and `timezone` columns + add CHECK constraints
+- data repair: re-stamp run-log rows whose `tenant_id` differs from their job's (older releases logged under the executing instance's tenant). Joined through the `cron_id` FK; a no-op once repaired.
 
 The legacy rename uses a `colExists()` JS helper to build an `information_schema.columns` guard (Postgres has no `IF EXISTS` for `RENAME COLUMN`), schema-qualified when a `tablePrefix` carries a schema. The helper lower-cases the table/schema names so the guard matches Postgres's unquoted-identifier folding — a mixed-case `tablePrefix` would otherwise skip the rename. When extending the schema in the future, add a new step inside `Cron.migrate` and bump the conceptual version note. CHECK additions go through the `addCheckIfMissing` helper (Postgres has no `IF NOT EXISTS` for constraints).
 
@@ -224,7 +257,9 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - `backdateNextRun(db, name)` — forces `next_run_at` into the past so poller picks it up
 - `createCronWithTenant(db, tenantId)` — helper for tenant-scoped tests
 - Test 9 (timeout): handler's `sleep(500)` is abandoned by TimeoutError at 50ms; test waits 700ms to let the timer fire during the test — avoids cross-test leaks
-- Test 6 (drift): uses 200ms handler + 100ms window to guarantee exactly 1 run before `stop()`
+- Test 6 (missed ticks): 10-minute backdate on a per-minute job must yield exactly 1 run and a future `next_run_at`
+- `tests/cron-fixes-2.test.ts`: jobs that must run exactly once use a yearly expression (`0 0 1 1 *`) + backdate, so a minute boundary passing mid-test cannot add a run. `failNextTxCheckouts(db, n)` makes the next `n` `withTx` checkouts fail with `ECONNRESET` while `pool.query()` keeps working (bare `pool.connect()` vs `pool.connect(cb)`)
+- Heartbeat tests set `heartbeatIntervalMs: 40`; the 30 s default never fires inside a test
 - Tests 21-31: tenant_id scoping (isolation, find, unregister, enable/disable, claim)
 - Test 32: legacy `project_id` → `tenant_id` migration (column + indexes renamed in place, data preserved, idempotent)
 - Test 33: legacy migration with a mixed-case `tablePrefix` — `colExists()` lower-cases identifiers to match Postgres folding (else the rename silently no-ops)
@@ -274,12 +309,13 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 ## Before Making Changes
 
 - [ ] Read `src/cron/cron.ts` for types and context structure
-- [ ] For scheduling logic changes: verify drift-safe invariant in `_handle-success.ts` and `_handle-failure.ts`
+- [ ] For scheduling logic changes: go through `_nextRunAt` (`_next-run.ts`); never compute `next_run_at` elsewhere
+- [ ] For anything written on behalf of a claimed job: use the job-tenant context, keep it OUTSIDE the handler's `try`
 - [ ] For new write paths against a claimed row: include `lease_token` fence in WHERE
 - [ ] For multi-statement DB work: use `withTx` (NOT `db.query("BEGIN")` on a Pool)
 - [ ] For new management queries: always include `tenant_id` filtering
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `deno task test` after changes (88 tests)
+- [ ] Run `deno task test` after changes (75 tests)
 - [ ] DB integration tests require `TEST_PG_*` env vars

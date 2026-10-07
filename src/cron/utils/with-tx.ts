@@ -7,7 +7,7 @@ import type pg from "pg";
  * `release()` call. `pg.Client` may expose `connect()` too, but it returns
  * `void` and there is no per-call client lifecycle.
  */
-function isPool(db: pg.Pool | pg.Client): db is pg.Pool {
+export function isPool(db: pg.Pool | pg.Client): db is pg.Pool {
 	// `pg.Pool` exposes `totalCount` (and `idleCount`/`waitingCount`); `pg.Client` does not.
 	// deno-lint-ignore no-explicit-any
 	return typeof (db as any).totalCount === "number";

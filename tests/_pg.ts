@@ -17,3 +17,14 @@ export function createPg() {
 		port: parseInt(PG_PORT!),
 	});
 }
+
+/** A single (unconnected) client with the same settings — call `connect()` yourself. */
+export function createPgClient() {
+	return new pg.Client({
+		host: PG_HOST,
+		user: PG_USER,
+		database: PG_DATABASE,
+		password: PG_PASSWORD,
+		port: parseInt(PG_PORT!),
+	});
+}

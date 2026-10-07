@@ -3,9 +3,13 @@ import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
 /**
  * Resets stuck `running` jobs back to `idle` (crash recovery).
  *
- * Jobs that have been in `running` state longer than `maxAllowedRunDurationMinutes`
- * are assumed to have crashed. They are reset to `idle` with `next_run_at = NOW()`
- * so they are immediately eligible for re-execution on the next poll.
+ * A `running` job whose `last_run_at` is older than `maxAllowedRunDurationMinutes`
+ * is assumed to have crashed. It is reset to `idle` with `next_run_at = NOW()` so
+ * it is immediately eligible for re-execution on the next poll.
+ *
+ * `last_run_at` is set at claim time and then renewed by the executing worker's
+ * heartbeat (`_heartbeat.ts`), so the threshold measures *silence*, not total run
+ * time: a live worker on a long job keeps its claim, a dead one loses it.
  *
  * `lease_token` is cleared on the row. If the original (still-alive) worker
  * later returns to write a result, its `WHERE ... AND lease_token = $`

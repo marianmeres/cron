@@ -173,26 +173,26 @@ Deno.test("5 happy-flow", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("6 drift-prevention", async () => {
-	// Proof: after execution, next_run_at is computed from the SCHEDULED time,
-	// not the wall clock. With a 10-minute backdate and a 1-minute interval:
-	//   drift-safe:   next_run_at = scheduled + 1min = 9 min ago (still in the past)
-	//   drift-UNSAFE: next_run_at = NOW() + 1min         (in the future)
+Deno.test("6 missed-ticks-are-skipped-not-replayed", async () => {
+	// A job whose slot is long past (process was down, job was disabled, …) runs
+	// ONCE and then resumes at the next future slot. It must not replay every
+	// tick it missed back-to-back.
 	//
-	// The handler sleeps 200ms so stop() waits for it — guaranteeing exactly 1 run
-	// and no leaked timers. Only 1 run can happen in the 100ms window before stop().
+	// With a 10-minute backdate on a per-minute job, replaying would mean 10+
+	// immediate runs and a `next_run_at` still in the past after the first one.
+	// (That the next slot is derived from the scheduled time rather than the wall
+	// clock is covered by the `_nextRunAt` unit tests in cron-fixes.test.ts.)
 	const { db, cron } = await setup();
 	try {
+		let runs = 0;
 		await cron.register("precise", "* * * * *", async () => {
-			await sleep(200); // slow enough that only 1 run fits before stop()
+			runs++;
 			return "ok";
 		});
 
-		// Backdate by 10 minutes — far enough that drift-safe result is still in the past
 		const scheduledAt = new Date();
 		scheduledAt.setMinutes(scheduledAt.getMinutes() - 10);
 		scheduledAt.setSeconds(0, 0);
-		scheduledAt.setMilliseconds(0);
 
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron SET next_run_at = $1 WHERE name = 'precise'`,
@@ -200,17 +200,18 @@ Deno.test("6 drift-prevention", async () => {
 		);
 
 		await cron.start(1);
-		await sleep(100); // let the poller claim and start the job (poll=50ms)
-		await cron.stop(); // waits for the 200ms handler to finish → exactly 1 run
+		await sleep(400); // room for several polls (poll=50ms) — a replay would show
+		await cron.stop();
 
 		const after = await fetchJob(db, "precise");
 		assertEquals(after.last_run_status, RUN_STATUS.SUCCESS);
-
-		// Drift-safe: next_run_at must still be in the past (~9 min ago)
+		assertEquals(runs, 1, `missed ticks were replayed: ${runs} runs`);
 		assert(
-			new Date(after.next_run_at) < new Date(),
-			`drift detected! next_run_at is in the future, meaning it was computed from NOW() not scheduledAt`
+			new Date(after.next_run_at) > new Date(),
+			"next_run_at must be the next FUTURE slot, not a missed one"
 		);
+		// …and that slot is minute-aligned, i.e. still on the cron grid
+		assertEquals(new Date(after.next_run_at).getSeconds(), 0);
 	} finally {
 		await db.end();
 	}
