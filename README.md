@@ -15,11 +15,11 @@ isolation, and an optional task registry for UI-driven job management.
 ## Installation
 
 ```bash
-# npm / Node.js
 npm install @marianmeres/cron
+```
 
-# Deno (JSR)
-deno add @marianmeres/cron
+```bash
+deno add jsr:@marianmeres/cron
 ```
 
 ## Usage
@@ -357,6 +357,25 @@ run-log rows (second bullet).
 ## API
 
 See [API.md](API.md) for full API reference.
+
+## Development
+
+Node LTS (`.node-version`), pnpm, Biome, `node:test`. The source is erasable-only
+TypeScript that Node runs directly; `dist/` is built only for publishing to npm. JSR is
+served the `.ts` source (`jsr.json`). The tests need a PostgreSQL database: copy
+`.env.example` to `.env` and set the `TEST_PG_*` credentials.
+
+| Command                             | Does                                                         |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `pnpm install`                      | installs the deps and the dev tooling                        |
+| `pnpm test` / `pnpm run test:watch` | `node --test` over `tests/**/*.test.ts`, one file at a time  |
+| `pnpm run test:deno`                | the same suite on Deno, resolved as JSR consumers see it     |
+| `pnpm run typecheck`                | `tsc --noEmit` over `src` and `tests`                        |
+| `pnpm run lint` / `pnpm run format` | `biome check .` read-only / with `--write`                   |
+| `pnpm run ci`                       | typecheck + lint + test, what CI runs                        |
+| `pnpm run build`                    | `tsc -p tsconfig.build.json` → `dist/`                       |
+| `pnpm run jsr:check`                | `deno publish --dry-run` with the `package.json` version     |
+| `pnpm run rp` / `pnpm run rpm`      | patch / minor release, then publish to npm and JSR           |
 
 ## License
 

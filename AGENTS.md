@@ -2,9 +2,15 @@
 
 ## Quick Reference
 
-- **Stack**: Deno, TypeScript, PostgreSQL (pg v8)
-- **Test**: `deno task test` (all) | `deno test -A --env-file tests/cron-db.test.ts` (DB only)
-- **Build**: `deno task npm:build`
+- **Stack**: TypeScript (erasable-only), Node LTS (`.node-version`), pnpm, `node:test`, Biome;
+  PostgreSQL (pg v8)
+- **Install**: `pnpm install` | **Test**: `pnpm test` (one file: `node --test --env-file-if-exists=.env tests/cron-db.test.ts`)
+  | **Check all**: `pnpm run ci` (typecheck + lint + test)
+- **Deno suite**: `pnpm run test:deno` | **JSR dry run**: `pnpm run jsr:check`
+- **Build npm**: `pnpm run build` (`tsc` → `dist/`) | **Release + publish**: `pnpm run rp` / `rpm`
+  (human action)
+- **Registries**: npm gets `dist/` (manifest `package.json`, the version of record); JSR gets
+  the `.ts` source (manifest `jsr.json`, no version).
 - **Entry**: `src/mod.ts` → `src/cron.ts` → `src/cron/cron.ts` (includes `CronTenantScope` interface)
 
 ---
@@ -34,10 +40,10 @@ src/
     _mark-stale.ts        — crash recovery: reset RUNNING jobs with no recent sign of life (clears lease_token)
     _health-preview.ts    — aggregate stats from run log (tenant-scoped)
     utils/
-      sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ for Deno hygiene + AbortSignal
+      sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ (test timer hygiene) + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
       with-tx.ts          — withTx(db, async (client) => …) — works on Pool AND Client; exports isPool()
-      unref-timer.ts      — unrefTimer(): Node/Bun .unref() or Deno.unrefTimer()
+      unref-timer.ts      — unrefTimer(): Node's .unref(), or Deno.unrefTimer() for JSR consumers on Deno
       with-db-retry.ts    — withDbRetry() with exponential backoff
       db-health.ts        — DbHealthMonitor, checkDbHealth()
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
@@ -49,6 +55,10 @@ tests/
                             shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
                             heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
+package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
+jsr.json                  — JSR manifest: exports, jsr:/npm: import map, publish.include
+tsconfig.json             — type gate (src + tests, noEmit)
+tsconfig.build.json       — src → dist (ESM + .d.ts) for npm
 ```
 
 ---
@@ -187,6 +197,27 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 
 ---
 
+## Tooling Conventions
+
+1. **Runtime policy** — Node at the keyboard, npm as the registry of record, JSR kept for
+   Deno consumers. No `Bun.*`, `jsr:` or `npm:` specifiers in `src/` or `tests/`; the one
+   `Deno.*` reference is the feature-detected `Deno.unrefTimer` in `unref-timer.ts`.
+2. **Erasable TypeScript** — no `enum`, `namespace`, constructor parameter properties;
+   `import type` for types; explicit `.ts` import extensions (rewritten to `.js` on emit).
+   Node strips types and never checks them: `pnpm run typecheck` is the only type gate.
+   `noUncheckedIndexedAccess` is off (Deno never had it, and the move off Deno changed no code).
+3. **Formatting** — tabs, 4 wide, 90 columns, double quotes (`biome.json`); manifests at 2
+   spaces. `pnpm run format` before committing.
+4. **JSR** — `deno publish` rewrites bare specifiers through `jsr.json`'s `imports`: the four
+   `@marianmeres/*` deps go to `jsr:` (the copies Deno consumers already use) and `pg` to
+   `npm:`. Keep each range equal in `package.json` and `jsr.json`. The version comes from
+   `--set-version`. `test:deno` runs the suite against `jsr.json` with `--no-check` (Deno's
+   checker trips over `@types/node` in `node_modules`); `jsr:check` keeps Deno's type check.
+5. **Never run a script named `publish`** (npm lifecycle hook); publishing is `publish:all` /
+   `publish:jsr`, via `rp` / `rpm`.
+
+---
+
 ## DB Schema
 
 ### `__cron`
@@ -268,14 +299,19 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 
 ### Avoiding leaked timers in tests with abandoned handlers
 
-When a test deliberately stops the cron *before* an in-flight handler returns (e.g. testing `drainTimeoutMs`), Deno's leak detector will flag the still-running setTimeout from the handler. Patterns:
+When a test deliberately stops the cron *before* an in-flight handler returns (e.g. testing `drainTimeoutMs`), Deno's leak detector (`pnpm run test:deno`) will flag the still-running setTimeout from the handler, and under `node --test` the timer keeps the file's process alive until it fires. Patterns:
 
 1. Pass a `__timeout_ref__` ref into the handler's `sleep(ms, ref)` so the test can `clearTimeout(ref.id)` before exiting.
 2. Wait long enough at the end of the test for the abandoned timer to fire naturally (e.g. handler sleep 700ms, test trailing sleep 800ms).
 
 ### Test DB setup
+
+`pnpm test` loads `.env` when present (`--env-file-if-exists`); copy `.env.example`. Files run
+one at a time (`--test-concurrency=1`), as `deno test` ran them: every file uses the same
+`_test_` tables.
+
 ```bash
-# Requires TEST_PG_* env vars (see tests/.env or .env)
+# Requires TEST_PG_* env vars (see .env.example)
 TEST_PG_HOST=localhost
 TEST_PG_DATABASE=cron_test
 TEST_PG_USER=...
@@ -317,5 +353,6 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `deno task test` after changes (75 tests)
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 75 tests); `pnpm run format` before committing
+- [ ] Before a JSR publish: `pnpm run test:deno` and `pnpm run jsr:check`
 - [ ] DB integration tests require `TEST_PG_*` env vars

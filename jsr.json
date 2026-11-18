@@ -1,0 +1,24 @@
+{
+  "name": "@marianmeres/cron",
+  "exports": "./src/mod.ts",
+  "imports": {
+    "@marianmeres/clog": "jsr:@marianmeres/clog@^3.23.0",
+    "@marianmeres/cron-parser": "jsr:@marianmeres/cron-parser@^1.0.1",
+    "@marianmeres/modelize": "jsr:@marianmeres/modelize@^3.0.0",
+    "@marianmeres/pubsub": "jsr:@marianmeres/pubsub@^3.0.0",
+    "pg": "npm:pg@^8.23.1"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "README.md",
+      "API.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "LICENSE",
+      ".editorconfig",
+      ".env.example"
+    ]
+  }
+}

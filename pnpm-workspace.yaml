@@ -1,0 +1,4 @@
+# own packages are trusted as soon as they are published (pnpm's minimum release age
+# would otherwise hold back a fresh @marianmeres/* release)
+minimumReleaseAgeExclude:
+  - "@marianmeres/*"

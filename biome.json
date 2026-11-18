@@ -1,0 +1,61 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"includes": [
+			"**",
+			"!**/dist",
+			"!**/node_modules",
+			"!**/tmp",
+			"!pnpm-lock.yaml",
+			"!pnpm-workspace.yaml"
+		]
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab",
+		"indentWidth": 4,
+		"lineWidth": 90
+	},
+	"javascript": {
+		"formatter": {
+			"quoteStyle": "double",
+			"semicolons": "always",
+			"trailingCommas": "all"
+		}
+	},
+	"yaml": {
+		"formatter": {
+			"indentWidth": 2
+		}
+	},
+	"markdown": {
+		"parser": {
+			"frontmatter": true
+		},
+		"formatter": {
+			"formatEmbeds": false
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["**/package.json", "**/deno.json", "**/jsr.json"],
+			"json": {
+				"formatter": {
+					"indentStyle": "space",
+					"indentWidth": 2
+				}
+			}
+		}
+	],
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended"
+		}
+	}
+}

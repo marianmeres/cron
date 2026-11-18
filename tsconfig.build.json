@@ -1,0 +1,11 @@
+{
+	// `pnpm run build`: emits src/ to dist/ (ESM + .d.ts), which is all that gets published.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"rootDir": "src",
+		"outDir": "dist",
+		"declaration": true
+	},
+	"include": ["src"]
+}

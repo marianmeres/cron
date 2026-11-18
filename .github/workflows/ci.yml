@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # Node LTS is the dev runtime, the reference and the gate: a red run here blocks.
+  # Nothing runs on Deno or Bun.
+  node:
+    runs-on: ubuntu-latest
+    # The test suite needs a real PostgreSQL (see .env.example); same major as pg-infra.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: cron
+          POSTGRES_PASSWORD: cron
+          POSTGRES_DB: cron_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_PG_HOST: localhost
+      TEST_PG_PORT: 5432
+      TEST_PG_DATABASE: cron_test
+      TEST_PG_USER: cron
+      TEST_PG_PASSWORD: cron
+    steps:
+      - uses: actions/checkout@v7
+      # pnpm version is read from package.json "packageManager".
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci

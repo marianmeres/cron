@@ -1,0 +1,29 @@
+{
+	// Editor + `pnpm run typecheck` view: src and tests, no output. Node runs the
+	// source with its types stripped and never checks them, so this is the type gate.
+	"compilerOptions": {
+		"target": "es2024",
+		// add "dom" when the package also runs in the browser and uses DOM types
+		"lib": ["es2024"],
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"types": ["node"],
+
+		"strict": true,
+		// noUncheckedIndexedAccess is off: Deno never had it, and the move off Deno
+		// changes no code
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
+		"skipLibCheck": true,
+
+		// erasable-only TS: what Node's type stripping can run unchanged
+		"verbatimModuleSyntax": true,
+		"erasableSyntaxOnly": true,
+		// imports keep their `.ts` extension in source; tsc rewrites them to `.js` on emit
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+
+		"noEmit": true
+	},
+	"include": ["src", "tests"]
+}
