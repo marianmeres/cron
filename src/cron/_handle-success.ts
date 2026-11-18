@@ -1,6 +1,6 @@
-import { CRON_STATUS, RUN_STATUS, type CronContext, type CronJob } from "./cron.ts";
 import { _logRunSuccess } from "./_log-run.ts";
 import { _nextRunAt } from "./_next-run.ts";
+import { CRON_STATUS, type CronContext, type CronJob, RUN_STATUS } from "./cron.ts";
 import { withTx } from "./utils/with-tx.ts";
 
 /**
@@ -24,7 +24,7 @@ export async function _handleCronSuccess(
 	scheduledAt: Date,
 	runLogId: number,
 	result: unknown,
-	leaseToken: string | null
+	leaseToken: string | null,
 ): Promise<CronJob> {
 	const { tableNames } = context;
 	const { tableCron } = tableNames;
@@ -54,13 +54,13 @@ export async function _handleCronSuccess(
 				lease_token     = NULL
 			WHERE id = $4${leaseClause}
 			RETURNING *`,
-			params
+			params,
 		);
 
 		// Always finalise the run log — the run did happen, even if the lease was lost
 		await _logRunSuccess(context, runLogId, result, client);
 
 		// If the WHERE didn't match (lease lost), return the original job for the event payload
-		return ((rows[0] as CronJob | undefined) ?? job);
+		return (rows[0] as CronJob | undefined) ?? job;
 	});
 }

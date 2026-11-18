@@ -24,7 +24,7 @@ import type { CronJob } from "./cron.ts";
 export function _nextRunAt(
 	job: Pick<CronJob, "expression" | "timezone">,
 	scheduledAt: Date,
-	now: Date = new Date()
+	now: Date = new Date(),
 ): Date {
 	const parser = new CronParser(job.expression, {
 		timezone: job.timezone ?? undefined,

@@ -1,11 +1,11 @@
+import { _nextRunAt } from "./_next-run.ts";
 import {
 	BACKOFF_STRATEGY,
 	CRON_STATUS,
-	RUN_STATUS,
 	type CronContext,
 	type CronJob,
+	RUN_STATUS,
 } from "./cron.ts";
-import { _nextRunAt } from "./_next-run.ts";
 import { withTx } from "./utils/with-tx.ts";
 
 /** Default cap on inter-attempt exponential backoff. */
@@ -30,7 +30,7 @@ export async function _handleCronFailure(
 	job: CronJob,
 	scheduledAt: Date,
 	isTimeout: boolean,
-	leaseToken: string | null
+	leaseToken: string | null,
 ): Promise<CronJob> {
 	const { tableNames } = context;
 	const { tableCron } = tableNames;
@@ -56,10 +56,10 @@ export async function _handleCronFailure(
 				lease_token     = NULL
 			WHERE id = $4${leaseClause}
 			RETURNING *`,
-			params
+			params,
 		);
 
-		return ((rows[0] as CronJob | undefined) ?? job);
+		return (rows[0] as CronJob | undefined) ?? job;
 	});
 }
 
@@ -72,7 +72,7 @@ export async function _handleCronFailure(
 export function _backoffMs(
 	strategy: string,
 	attempt: number,
-	maxMs: number = DEFAULT_MAX_BACKOFF_MS
+	maxMs: number = DEFAULT_MAX_BACKOFF_MS,
 ): number {
 	const whitelist = [BACKOFF_STRATEGY.EXP, BACKOFF_STRATEGY.NONE];
 	const effectiveStrategy = whitelist.includes(strategy as typeof BACKOFF_STRATEGY.EXP)
@@ -80,7 +80,7 @@ export function _backoffMs(
 		: BACKOFF_STRATEGY.NONE;
 
 	if (effectiveStrategy === BACKOFF_STRATEGY.EXP) {
-		const raw = Math.pow(2, attempt) * 1_000;
+		const raw = 2 ** attempt * 1_000;
 		return Math.min(raw, Math.max(0, maxMs));
 	}
 	return 0;

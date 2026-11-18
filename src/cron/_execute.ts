@@ -1,10 +1,10 @@
-import { type CronContext, type CronHandler, type CronJob, RUN_STATUS } from "./cron.ts";
+import { _backoffMs, _handleCronFailure } from "./_handle-failure.ts";
 import { _handleCronSuccess } from "./_handle-success.ts";
-import { _handleCronFailure, _backoffMs } from "./_handle-failure.ts";
 import { _startHeartbeat } from "./_heartbeat.ts";
-import { _logRunStart, _logRunError } from "./_log-run.ts";
-import { withTimeout, TimeoutError } from "./utils/with-timeout.ts";
+import { _logRunError, _logRunStart } from "./_log-run.ts";
+import { type CronContext, type CronHandler, type CronJob, RUN_STATUS } from "./cron.ts";
 import { sleep } from "./utils/sleep.ts";
+import { TimeoutError, withTimeout } from "./utils/with-timeout.ts";
 
 /** Optional knobs for `_executeCronJob`. */
 export interface ExecuteCronJobOptions {
@@ -53,7 +53,7 @@ export async function _executeCronJob(
 	handler: CronHandler,
 	leaseToken: string | null,
 	shutdownSignal?: AbortSignal,
-	options: ExecuteCronJobOptions = {}
+	options: ExecuteCronJobOptions = {},
 ): Promise<void> {
 	const withRetry = options.withRetry ?? (<T>(fn: () => Promise<T>) => fn());
 
@@ -87,7 +87,7 @@ export async function _executeCronJob(
 		() => {
 			state.leaseLost = true;
 			state.attemptCtrl?.abort(new Error("Cron job lease lost"));
-		}
+		},
 	);
 
 	try {
@@ -98,13 +98,14 @@ export async function _executeCronJob(
 			if (attempt > 1 && (shutdownSignal?.aborted || state.leaseLost)) break;
 
 			const runLogId = await withRetry(() =>
-				_logRunStart(ctx, job.id, job.name, scheduledAt, attempt)
+				_logRunStart(ctx, job.id, job.name, scheduledAt, attempt),
 			);
 
 			// Per-attempt abort controller. Triggered on timeout, shutdown or lease loss.
 			const attemptCtrl = new AbortController();
 			state.attemptCtrl = attemptCtrl;
-			const onShutdown = () => attemptCtrl.abort(new Error("Cron is shutting down"));
+			const onShutdown = () =>
+				attemptCtrl.abort(new Error("Cron is shutting down"));
 			// An already-aborted signal never fires "abort" again — handle it eagerly
 			// so the handler is not handed a live signal during shutdown.
 			if (shutdownSignal?.aborted) onShutdown();
@@ -124,7 +125,7 @@ export async function _executeCronJob(
 						__handler,
 						job.max_attempt_duration_ms,
 						"Execution timed out",
-						attemptCtrl
+						attemptCtrl,
 					);
 				}
 
@@ -140,7 +141,14 @@ export async function _executeCronJob(
 			if (!failed) {
 				// SUCCESS: update main row + finalise run log in a single TX
 				const completedJob = await withRetry(() =>
-					_handleCronSuccess(ctx, job, scheduledAt, runLogId, result, leaseToken)
+					_handleCronSuccess(
+						ctx,
+						job,
+						scheduledAt,
+						runLogId,
+						result,
+						leaseToken,
+					),
 				);
 
 				ctx.pubsubDone.publish(eventKey, completedJob);
@@ -154,7 +162,9 @@ export async function _executeCronJob(
 			const errStack =
 				error instanceof Error && error.stack ? { stack: error.stack } : null;
 
-			await withRetry(() => _logRunError(ctx, runLogId, errMsg, errStack, runStatus));
+			await withRetry(() =>
+				_logRunError(ctx, runLogId, errMsg, errStack, runStatus),
+			);
 
 			// Apply backoff before next attempt (if any remain)
 			if (attempt < job.max_attempts) {
@@ -165,7 +175,7 @@ export async function _executeCronJob(
 
 		// All attempts exhausted (or abandoned) — advance schedule so job remains alive
 		const failedJob = await withRetry(() =>
-			_handleCronFailure(ctx, job, scheduledAt, isTimeout, leaseToken)
+			_handleCronFailure(ctx, job, scheduledAt, isTimeout, leaseToken),
 		);
 
 		ctx.pubsubError.publish(eventKey, failedJob);

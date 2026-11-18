@@ -1,4 +1,4 @@
-export * from "./cron.ts";
 export * from "@marianmeres/cron-parser";
+export * from "./cron.ts";
+export { type SyncRegistryResult, syncRegistryToCron } from "./sync-registry.ts";
 export * from "./task-registry.ts";
-export { syncRegistryToCron, type SyncRegistryResult } from "./sync-registry.ts";

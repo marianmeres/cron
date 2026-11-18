@@ -58,7 +58,7 @@ export interface TaskRegistry {
 	 */
 	validate(
 		taskType: string,
-		payload: Record<string, unknown>
+		payload: Record<string, unknown>,
 	): Promise<TaskValidationResult>;
 }
 
@@ -90,9 +90,7 @@ export function createTaskRegistry(): TaskRegistry {
 
 	function define(taskType: string, definition: TaskDefinition): void {
 		if (registry.has(taskType)) {
-			throw new Error(
-				`Task type "${taskType}" is already defined`
-			);
+			throw new Error(`Task type "${taskType}" is already defined`);
 		}
 		registry.set(taskType, definition);
 	}
@@ -119,7 +117,7 @@ export function createTaskRegistry(): TaskRegistry {
 
 	async function validate(
 		taskType: string,
-		payload: Record<string, unknown>
+		payload: Record<string, unknown>,
 	): Promise<TaskValidationResult> {
 		const def = registry.get(taskType);
 		if (!def) {
@@ -136,7 +134,7 @@ export function createTaskRegistry(): TaskRegistry {
 		} catch {
 			throw new Error(
 				`@marianmeres/modelize is required for schema validation. ` +
-					`Install it to use paramsSchema.`
+					`Install it to use paramsSchema.`,
 			);
 		}
 
@@ -150,14 +148,13 @@ export function createTaskRegistry(): TaskRegistry {
 		} catch {
 			throw new Error(
 				`ajv is required for JSON Schema validation. ` +
-					`Install it alongside @marianmeres/modelize to use paramsSchema.`
+					`Install it alongside @marianmeres/modelize to use paramsSchema.`,
 			);
 		}
 
-		const model = modelize(
-			{ ...payload } as Record<string, unknown>,
-			{ schema: ajvSchema(def.paramsSchema) }
-		);
+		const model = modelize({ ...payload } as Record<string, unknown>, {
+			schema: ajvSchema(def.paramsSchema),
+		});
 
 		// deno-lint-ignore no-explicit-any
 		const m = model as any;

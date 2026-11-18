@@ -5,15 +5,15 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Logger } from "@marianmeres/clog";
+import type pg from "pg";
 import {
 	Cron,
+	type CronJob,
 	createTaskRegistry,
 	syncRegistryToCron,
-	type CronJob,
 } from "../src/mod.ts";
 import { createPg } from "./_pg.ts";
-import type pg from "pg";
-import type { Logger } from "@marianmeres/clog";
 
 const TABLE_PREFIX = "_test_";
 const POLL = 50;

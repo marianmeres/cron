@@ -1,5 +1,5 @@
-import { type CronHandler, type CronJob } from "./cron.ts";
-import { type TaskRegistry } from "./task-registry.ts";
+import type { CronHandler, CronJob } from "./cron.ts";
+import type { TaskRegistry } from "./task-registry.ts";
 
 /**
  * Result of syncing a task registry with a Cron instance.
@@ -58,7 +58,7 @@ const DEFAULT_PAGE_SIZE = 500;
 export async function syncRegistryToCron(
 	cron: CronLike,
 	registry: TaskRegistry,
-	options: { pageSize?: number } = {}
+	options: { pageSize?: number } = {},
 ): Promise<SyncRegistryResult> {
 	const synced: string[] = [];
 	const registeredTypes = new Set<string>();

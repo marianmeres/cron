@@ -1,4 +1,4 @@
-import { type CronContext, type CronHealthPreviewRow } from "./cron.ts";
+import type { CronContext, CronHealthPreviewRow } from "./cron.ts";
 
 /**
  * Returns execution statistics from the run log, grouped by status.
@@ -11,7 +11,7 @@ import { type CronContext, type CronHealthPreviewRow } from "./cron.ts";
  */
 export async function _healthPreview(
 	context: CronContext,
-	sinceMinutesAgo: number = 60
+	sinceMinutesAgo: number = 60,
 ): Promise<CronHealthPreviewRow[]> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -29,7 +29,7 @@ export async function _healthPreview(
 		  AND started_at > NOW() - ($2 * INTERVAL '1 minute')
 		GROUP BY status
 		ORDER BY status`,
-		[context.tenantId, sinceMinutesAgo]
+		[context.tenantId, sinceMinutesAgo],
 	);
 
 	return rows;

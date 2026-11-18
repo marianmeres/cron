@@ -26,7 +26,7 @@ export function _startHeartbeat(
 	job: Pick<CronJob, "id" | "name" | "tenant_id">,
 	leaseToken: string | null,
 	intervalMs: number,
-	onLeaseLost: () => void
+	onLeaseLost: () => void,
 ): () => void {
 	// No lease to renew (legacy callers) or heartbeat disabled
 	if (leaseToken === null || !(intervalMs > 0)) return () => {};
@@ -54,7 +54,7 @@ export function _startHeartbeat(
 				`UPDATE ${tableCron}
 				SET last_run_at = NOW()
 				WHERE id = $1 AND lease_token = $2`,
-				[job.id, leaseToken]
+				[job.id, leaseToken],
 			);
 			if (!stopped && (res.rowCount ?? 0) === 0) {
 				stop();
@@ -66,7 +66,7 @@ export function _startHeartbeat(
 				logger?.warn?.(
 					`Cron job ${label}: heartbeat failed (will retry): ${
 						e instanceof Error ? e.message : e
-					}`
+					}`,
 				);
 			}
 		} finally {

@@ -27,7 +27,7 @@ export function withTimeout<T>(
 	fn: CallableFunction,
 	timeout: number = 1_000,
 	errMessage?: string,
-	abortController?: AbortController
+	abortController?: AbortController,
 ): (...args: unknown[]) => Promise<T> {
 	return (...args: unknown[]) => {
 		let _timeoutId: ReturnType<typeof setTimeout>;
@@ -35,7 +35,7 @@ export function withTimeout<T>(
 		const _clock = new Promise<never>((_, reject) => {
 			_timeoutId = setTimeout(() => {
 				const err = new TimeoutError(
-					errMessage || `Timed out after ${timeout} ms`
+					errMessage || `Timed out after ${timeout} ms`,
 				);
 				abortController?.abort(err);
 				reject(err);
@@ -45,7 +45,7 @@ export function withTimeout<T>(
 		const _promise = Promise.resolve().then(() => fn(...args));
 
 		return Promise.race([_promise, _clock]).finally(() =>
-			clearTimeout(_timeoutId)
+			clearTimeout(_timeoutId),
 		) as Promise<T>;
 	};
 }

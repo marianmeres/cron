@@ -59,7 +59,7 @@ const DEFAULT_RETRYABLE_ERRORS = [
  */
 export async function withDbRetry<T>(
 	fn: () => Promise<T>,
-	options: DbRetryOptions = {}
+	options: DbRetryOptions = {},
 ): Promise<T> {
 	const {
 		maxRetries = 3,
@@ -80,10 +80,12 @@ export async function withDbRetry<T>(
 			lastError = error;
 
 			// Check if error is retryable
-			const errorCode = (error as Record<string, unknown>)?.code as string | undefined;
+			const errorCode = (error as Record<string, unknown>)?.code as
+				| string
+				| undefined;
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const isRetryable = retryableErrors.some(
-				(code) => errorCode === code || errorMessage?.includes(code)
+				(code) => errorCode === code || errorMessage?.includes(code),
 			);
 
 			// Don't retry on last attempt or non-retryable errors
@@ -94,7 +96,7 @@ export async function withDbRetry<T>(
 			logger?.warn?.(
 				`DB operation failed (attempt ${attempt + 1}/${maxRetries + 1}): ${
 					errorCode || errorMessage
-				}. Retrying in ${delayMs}ms...`
+				}. Retrying in ${delayMs}ms...`,
 			);
 
 			// wait before retry

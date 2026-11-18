@@ -9,17 +9,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Logger } from "@marianmeres/clog";
+import type pg from "pg";
+import { sleep } from "../src/cron/utils/sleep.ts";
 import {
-	Cron,
 	CRON_STATUS,
+	Cron,
+	type CronJob,
 	DEFAULT_TENANT_ID,
 	RUN_STATUS,
-	type CronJob,
 } from "../src/mod.ts";
-import { sleep } from "../src/cron/utils/sleep.ts";
 import { createPg } from "./_pg.ts";
-import type pg from "pg";
-import type { Logger } from "@marianmeres/clog";
 
 // ---- test helpers -------------------------------------------------------
 
@@ -51,7 +51,7 @@ async function backdateNextRun(db: pg.Pool, name: string, msAgo = 100) {
 		`UPDATE ${TABLE_PREFIX}__cron
 		 SET next_run_at = NOW() - ($1 * INTERVAL '1 millisecond')
 		 WHERE name = $2`,
-		[msAgo, name]
+		[msAgo, name],
 	);
 }
 
@@ -59,7 +59,7 @@ async function backdateNextRun(db: pg.Pool, name: string, msAgo = 100) {
 async function fetchJob(db: pg.Pool, name: string) {
 	const { rows } = await db.query(
 		`SELECT * FROM ${TABLE_PREFIX}__cron WHERE name = $1`,
-		[name]
+		[name],
 	);
 	return rows[0];
 }
@@ -127,7 +127,7 @@ test("3 register-upsert-keeps-next-run-at", async () => {
 		assert.deepStrictEqual(
 			updated.next_run_at.toISOString(),
 			originalNextRun.toISOString(),
-			"next_run_at should not change on upsert"
+			"next_run_at should not change on upsert",
 		);
 	} finally {
 		await teardown(cron, db);
@@ -141,7 +141,7 @@ test("4 register-invalid-expression-throws", async () => {
 	try {
 		await assert.rejects(
 			() => cron.register("bad", "not a valid expression", async () => {}),
-			Error
+			Error,
 		);
 	} finally {
 		await teardown(cron, db);
@@ -197,7 +197,7 @@ test("6 missed-ticks-are-skipped-not-replayed", async () => {
 
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron SET next_run_at = $1 WHERE name = 'precise'`,
-			[scheduledAt]
+			[scheduledAt],
 		);
 
 		await cron.start(1);
@@ -209,7 +209,7 @@ test("6 missed-ticks-are-skipped-not-replayed", async () => {
 		assert.deepStrictEqual(runs, 1, `missed ticks were replayed: ${runs} runs`);
 		assert.ok(
 			new Date(after.next_run_at) > new Date(),
-			"next_run_at must be the next FUTURE slot, not a missed one"
+			"next_run_at must be the next FUTURE slot, not a missed one",
 		);
 		// …and that slot is minute-aligned, i.e. still on the cron grid
 		assert.deepStrictEqual(new Date(after.next_run_at).getSeconds(), 0);
@@ -232,7 +232,7 @@ test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
 				if (attempts < 3) throw new Error(`fail attempt ${attempts}`);
 				return { done: true };
 			},
-			{ max_attempts: 3 }
+			{ max_attempts: 3 },
 		);
 
 		await backdateNextRun(db, "retry-job");
@@ -264,7 +264,7 @@ test("8 max-attempts-exceeded-advances-schedule", async () => {
 				attempts++;
 				throw new Error("always fails");
 			},
-			{ max_attempts: 2 }
+			{ max_attempts: 2 },
 		);
 
 		await backdateNextRun(db, "always-fail");
@@ -300,7 +300,7 @@ test("9 timeout-enforcement", async () => {
 				await sleep(500); // will be killed at 50ms; timer resolves at ~500ms
 				return "done";
 			},
-			{ max_attempt_duration_ms: 50 }
+			{ max_attempt_duration_ms: 50 },
 		);
 
 		await backdateNextRun(db, "slow-job");
@@ -462,7 +462,7 @@ test("15 getRunHistory-returns-logs", async () => {
 		// Newest first
 		assert.ok(
 			new Date(history[0].started_at) >= new Date(history[1].started_at),
-			"run log must be ordered newest first"
+			"run log must be ordered newest first",
 		);
 	} finally {
 		await teardown(cron, db);
@@ -481,7 +481,7 @@ test("16 cleanup-reclaims-stale-running-jobs", async () => {
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET status = 'running',
 			     last_run_at = NOW() - INTERVAL '10 minutes'
-			 WHERE name = 'stuck'`
+			 WHERE name = 'stuck'`,
 		);
 
 		const before = await fetchJob(db, "stuck");
@@ -490,7 +490,11 @@ test("16 cleanup-reclaims-stale-running-jobs", async () => {
 		await cron.cleanup(5); // 5-minute threshold
 
 		const after = await fetchJob(db, "stuck");
-		assert.deepStrictEqual(after.status, CRON_STATUS.IDLE, "stale job must be reset to idle");
+		assert.deepStrictEqual(
+			after.status,
+			CRON_STATUS.IDLE,
+			"stale job must be reset to idle",
+		);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -618,16 +622,8 @@ test("22 tenant_id-same-name-different-tenants", async () => {
 	const cronB = createCronWithTenant(db, "tenant-b");
 
 	try {
-		const jobA = await cronA.register(
-			"report",
-			"* * * * *",
-			async () => "a"
-		);
-		const jobB = await cronB.register(
-			"report",
-			"0 * * * *",
-			async () => "b"
-		);
+		const jobA = await cronA.register("report", "* * * * *", async () => "a");
+		const jobB = await cronB.register("report", "0 * * * *", async () => "b");
 
 		assert.deepStrictEqual(jobA.tenant_id, "tenant-a");
 		assert.deepStrictEqual(jobB.tenant_id, "tenant-b");
@@ -751,7 +747,7 @@ test("26 single-start-serves-multiple-tenants", async () => {
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET next_run_at = NOW() - INTERVAL '1 second'
-			 WHERE name = 'job'`
+			 WHERE name = 'job'`,
 		);
 
 		// Single start() processes both tenants
@@ -823,14 +819,18 @@ test("28 forTenant-event-isolation", async () => {
 
 		let doneA: CronJob | null = null;
 		let doneB: CronJob | null = null;
-		projA.onDone("job", (job) => { doneA = job; });
-		projB.onDone("job", (job) => { doneB = job; });
+		projA.onDone("job", (job) => {
+			doneA = job;
+		});
+		projB.onDone("job", (job) => {
+			doneB = job;
+		});
 
 		// Only backdate tenant-a
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET next_run_at = NOW() - INTERVAL '1 second'
-			 WHERE tenant_id = 'tenant-a' AND name = 'job'`
+			 WHERE tenant_id = 'tenant-a' AND name = 'job'`,
 		);
 
 		await cron.start(1);
@@ -838,7 +838,11 @@ test("28 forTenant-event-isolation", async () => {
 
 		assert.ok(doneA !== null, "projA onDone must fire");
 		assert.deepStrictEqual((doneA as CronJob).tenant_id, "tenant-a");
-		assert.deepStrictEqual(doneB, null, "projB onDone must NOT fire (its job was not due)");
+		assert.deepStrictEqual(
+			doneB,
+			null,
+			"projB onDone must NOT fire (its job was not due)",
+		);
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
@@ -865,7 +869,7 @@ test("29 global-cleanup-recovers-all-tenants", async () => {
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET status = 'running',
 			     last_run_at = NOW() - INTERVAL '10 minutes'
-			 WHERE name = 'stuck'`
+			 WHERE name = 'stuck'`,
 		);
 
 		// Global cleanup on the Cron instance recovers all
@@ -900,7 +904,7 @@ test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET status = 'running',
 			     last_run_at = NOW() - INTERVAL '10 minutes'
-			 WHERE name = 'stuck'`
+			 WHERE name = 'stuck'`,
 		);
 
 		// Scoped cleanup on projA only recovers tenant-a
@@ -908,7 +912,11 @@ test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 
 		const jobA = await projA.find("stuck");
 		const jobB = await projB.find("stuck");
-		assert.deepStrictEqual(jobA!.status, CRON_STATUS.IDLE, "tenant-a must be recovered");
+		assert.deepStrictEqual(
+			jobA!.status,
+			CRON_STATUS.IDLE,
+			"tenant-a must be recovered",
+		);
 		assert.deepStrictEqual(jobB!.status, "running", "tenant-b must still be stuck");
 	} finally {
 		await cron.stop();
@@ -940,7 +948,7 @@ test("31 forTenant-correct-handler-per-tenant", async () => {
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET next_run_at = NOW() - INTERVAL '1 second'
-			 WHERE tenant_id = 'tenant-a' AND name = 'job'`
+			 WHERE tenant_id = 'tenant-a' AND name = 'job'`,
 		);
 
 		await cron.start(1);
@@ -972,14 +980,14 @@ test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 		const { rows } = await db.query(
 			`SELECT column_name FROM information_schema.columns
 			 WHERE table_name = $1 AND table_schema = 'public'`,
-			[table]
+			[table],
 		);
 		return rows.map((r) => r.column_name as string);
 	};
 	const idxs = async (table: string): Promise<string[]> => {
 		const { rows } = await db.query(
 			`SELECT indexname FROM pg_indexes WHERE tablename = $1 AND schemaname = 'public'`,
-			[table]
+			[table],
 		);
 		return rows.map((r) => r.indexname as string);
 	};
@@ -1029,7 +1037,7 @@ test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 			CREATE INDEX idx_${sr}_project_id ON ${runLog}(project_id);
 		`);
 		await db.query(
-			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`
+			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`,
 		);
 
 		await Cron.migrate(db, TABLE_PREFIX);
@@ -1043,16 +1051,29 @@ test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 		assert.ok(!runCols.includes("project_id"), "run log must not have project_id");
 
 		const { rows } = await db.query(
-			`SELECT tenant_id FROM ${cron} WHERE name = 'job'`
+			`SELECT tenant_id FROM ${cron} WHERE name = 'job'`,
 		);
-		assert.deepStrictEqual(rows[0]?.tenant_id, "acme", "data must be preserved across rename");
+		assert.deepStrictEqual(
+			rows[0]?.tenant_id,
+			"acme",
+			"data must be preserved across rename",
+		);
 
 		// Indexes renamed
 		const cronIdx = await idxs(cron);
-		assert.ok(cronIdx.includes(`idx_${sc}_tenant_name`), "unique index renamed to tenant_name");
-		assert.ok(!cronIdx.includes(`idx_${sc}_project_name`), "old project_name index gone");
+		assert.ok(
+			cronIdx.includes(`idx_${sc}_tenant_name`),
+			"unique index renamed to tenant_name",
+		);
+		assert.ok(
+			!cronIdx.includes(`idx_${sc}_project_name`),
+			"old project_name index gone",
+		);
 		const runIdx = await idxs(runLog);
-		assert.ok(runIdx.includes(`idx_${sr}_tenant_id`), "run log index renamed to tenant_id");
+		assert.ok(
+			runIdx.includes(`idx_${sr}_tenant_id`),
+			"run log index renamed to tenant_id",
+		);
 		assert.ok(!runIdx.includes(`idx_${sr}_project_id`), "old project_id index gone");
 
 		// Idempotent — a second migrate() must not throw or regress
@@ -1084,7 +1105,7 @@ test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 		const { rows } = await db.query(
 			`SELECT column_name FROM information_schema.columns
 			 WHERE table_name = $1 AND table_schema = 'public'`,
-			[tableLower.toLowerCase()]
+			[tableLower.toLowerCase()],
 		);
 		return rows.map((r) => r.column_name as string);
 	};
@@ -1117,7 +1138,7 @@ test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 			CREATE INDEX idx_${sr}_project_id ON ${runLog}(project_id);
 		`);
 		await db.query(
-			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`
+			`INSERT INTO ${cron} (project_id, name, expression) VALUES ('acme', 'job', '* * * * *')`,
 		);
 
 		await Cron.migrate(db, PREFIX);
@@ -1126,10 +1147,16 @@ test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 		assert.ok(cronCols.includes("tenant_id"), "tenant_id must exist after migrate");
 		assert.ok(
 			!cronCols.includes("project_id"),
-			"legacy project_id must be renamed (not left stranded) for a mixed-case prefix"
+			"legacy project_id must be renamed (not left stranded) for a mixed-case prefix",
 		);
-		const { rows } = await db.query(`SELECT tenant_id FROM ${cron} WHERE name = 'job'`);
-		assert.deepStrictEqual(rows[0]?.tenant_id, "acme", "data preserved across the case-sensitive rename");
+		const { rows } = await db.query(
+			`SELECT tenant_id FROM ${cron} WHERE name = 'job'`,
+		);
+		assert.deepStrictEqual(
+			rows[0]?.tenant_id,
+			"acme",
+			"data preserved across the case-sensitive rename",
+		);
 	} finally {
 		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
 		await db.end();

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { RUN_STATUS, type CronContext, type CronRunLog } from "./cron.ts";
+import { type CronContext, type CronRunLog, RUN_STATUS } from "./cron.ts";
 
 /** A pg client or pool that we can call `query()` on. */
 type Queryable = pg.PoolClient | pg.Client | pg.Pool;
@@ -11,7 +11,7 @@ export async function _logRunStart(
 	cronName: string,
 	scheduledAt: Date,
 	attemptNumber: number,
-	client?: Queryable
+	client?: Queryable,
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -21,7 +21,7 @@ export async function _logRunStart(
 		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, tenant_id, scheduled_at, attempt_number)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
-		[cronId, cronName, context.tenantId, scheduledAt, attemptNumber]
+		[cronId, cronName, context.tenantId, scheduledAt, attemptNumber],
 	);
 
 	return rows[0].id as number;
@@ -37,7 +37,7 @@ export async function _logRunSuccess(
 	context: CronContext,
 	runLogId: number,
 	result: unknown,
-	client?: Queryable
+	client?: Queryable,
 ): Promise<void> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -56,7 +56,7 @@ export async function _logRunSuccess(
 			completed_at = NOW(),
 			result = $2
 		WHERE id = $3`,
-		[RUN_STATUS.SUCCESS, serialized, runLogId]
+		[RUN_STATUS.SUCCESS, serialized, runLogId],
 	);
 }
 
@@ -67,7 +67,7 @@ export async function _logRunError(
 	errMessage: string,
 	errDetails: { stack: string } | null,
 	status: typeof RUN_STATUS.ERROR | typeof RUN_STATUS.TIMEOUT,
-	client?: Queryable
+	client?: Queryable,
 ): Promise<void> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -80,12 +80,7 @@ export async function _logRunError(
 			error_message = $2,
 			error_details = $3
 		WHERE id = $4`,
-		[
-			status,
-			errMessage,
-			errDetails ? JSON.stringify(errDetails) : null,
-			runLogId,
-		]
+		[status, errMessage, errDetails ? JSON.stringify(errDetails) : null, runLogId],
 	);
 }
 
@@ -97,7 +92,7 @@ export async function _logRunFetchAll(
 		limit?: number;
 		offset?: number;
 		sinceMinutesAgo?: number;
-	} = {}
+	} = {},
 ): Promise<CronRunLog[]> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -134,7 +129,7 @@ export async function _logRunFetchAll(
 export async function _logRunPrune(
 	context: CronContext,
 	olderThanMinutes: number,
-	tenantScoped: boolean = false
+	tenantScoped: boolean = false,
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;

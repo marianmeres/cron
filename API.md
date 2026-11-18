@@ -8,18 +8,18 @@ const cron = new Cron(options: CronOptions);
 
 ### Constructor Options (`CronOptions`)
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `db` | `pg.Pool \| pg.Client` | required | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` is limited to one processor (see `start()`) |
-| `tenantId` | `string` | `"_default"` | Tenant scope identifier — isolates all jobs to this tenant |
-| `tablePrefix` | `string` | `""` | Prefix for table names (e.g. `"myschema."`) |
-| `pollTimeoutMs` | `number` | `1000` | Poll interval when no jobs are due (ms) |
-| `gracefulSigterm` | `boolean` | `true` | Register SIGTERM handler for graceful shutdown. Attached by `start()`, detached by `stop()` |
-| `logger` | `Logger` | `clog("cron")` | Logger instance |
-| `dbRetry` | `DbRetryOptions \| boolean` | — | Enable retry on transient DB errors. Covers the claim query and the writes that record a run's outcome |
-| `dbHealthCheck` | `boolean \| object` | — | Enable DB health monitoring |
-| `heartbeatIntervalMs` | `number` | `30000` | How often a worker renews the claim of the job it is executing (bumps `last_run_at`), so a long-running job is not treated as crashed. Keep it at a third of the stale threshold or less. `0` disables |
-| `autoCleanup` | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | — | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`) |
+| Option                | Type                                                        | Default        | Description                                                                                                                                                                                            |
+| --------------------- | ----------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `db`                  | `pg.Pool \| pg.Client`                                      | required       | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` is limited to one processor (see `start()`)                                                                                               |
+| `tenantId`            | `string`                                                    | `"_default"`   | Tenant scope identifier — isolates all jobs to this tenant                                                                                                                                             |
+| `tablePrefix`         | `string`                                                    | `""`           | Prefix for table names (e.g. `"myschema."`)                                                                                                                                                            |
+| `pollTimeoutMs`       | `number`                                                    | `1000`         | Poll interval when no jobs are due (ms)                                                                                                                                                                |
+| `gracefulSigterm`     | `boolean`                                                   | `true`         | Register SIGTERM handler for graceful shutdown. Attached by `start()`, detached by `stop()`                                                                                                            |
+| `logger`              | `Logger`                                                    | `clog("cron")` | Logger instance                                                                                                                                                                                        |
+| `dbRetry`             | `DbRetryOptions \| boolean`                                 | —              | Enable retry on transient DB errors. Covers the claim query and the writes that record a run's outcome                                                                                                 |
+| `dbHealthCheck`       | `boolean \| object`                                         | —              | Enable DB health monitoring                                                                                                                                                                            |
+| `heartbeatIntervalMs` | `number`                                                    | `30000`        | How often a worker renews the claim of the job it is executing (bumps `last_run_at`), so a long-running job is not treated as crashed. Keep it at a third of the stale threshold or less. `0` disables |
+| `autoCleanup`         | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | —              | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`)                                                                                              |
 
 #### Tenant scoping
 
@@ -87,6 +87,7 @@ The job is scoped to the instance's `tenantId`. The unique constraint is `(tenan
 Throws if `expression` is not a valid 5-field cron expression — including impossible date combinations like `0 0 31 2 *` (Feb 31).
 
 **Parameters:**
+
 - `name` (string) — Job identifier (unique within the tenant)
 - `expression` (string) — 5-field cron expression
 - `handler` (CronHandler) — Async function to execute
@@ -94,15 +95,15 @@ Throws if `expression` is not a valid 5-field cron expression — including impo
 
 **`CronRegisterOptions`:**
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `payload` | `Record<string, any>` | `{}` | Static data passed to handler as `job.payload` |
-| `enabled` | `boolean` | `true` | Whether job participates in polling |
-| `max_attempts` | `number` | `1` | Max retries within one execution cycle |
-| `max_attempt_duration_ms` | `number` | `0` | Timeout per attempt (0 = disabled) |
-| `backoff_strategy` | `"none" \| "exp"` | `"none"` | Delay between retries (exp is clamped, see below) |
-| `timezone` | `string \| null` | `null` | IANA timezone for the cron expression (e.g. `"Europe/Prague"`); `null` means host local time |
-| `forceNextRunRecalculate` | `boolean` | `false` | Recalculate `next_run_at` on upsert |
+| Option                    | Type                  | Default  | Description                                                                                  |
+| ------------------------- | --------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| `payload`                 | `Record<string, any>` | `{}`     | Static data passed to handler as `job.payload`                                               |
+| `enabled`                 | `boolean`             | `true`   | Whether job participates in polling                                                          |
+| `max_attempts`            | `number`              | `1`      | Max retries within one execution cycle                                                       |
+| `max_attempt_duration_ms` | `number`              | `0`      | Timeout per attempt (0 = disabled)                                                           |
+| `backoff_strategy`        | `"none" \| "exp"`     | `"none"` | Delay between retries (exp is clamped, see below)                                            |
+| `timezone`                | `string \| null`      | `null`   | IANA timezone for the cron expression (e.g. `"Europe/Prague"`); `null` means host local time |
+| `forceNextRunRecalculate` | `boolean`             | `false`  | Recalculate `next_run_at` on upsert                                                          |
 
 > **Backoff:** `"exp"` strategy doubles the delay each attempt (`2^n s`) and is clamped at **5 minutes**. Legacy unbounded growth is gone.
 
@@ -172,6 +173,7 @@ Fetches a job by name within the current tenant. Returns `null` if not found.
 Fetches all registered jobs for the current tenant.
 
 **Options:**
+
 - `enabled` (boolean) — Filter by enabled state
 - `status` (`"idle" | "running"`) — Filter by status
 - `limit` / `offset` (number) — Pagination
@@ -181,6 +183,7 @@ Fetches all registered jobs for the current tenant.
 Returns the execution log for a job, newest first.
 
 **Options:**
+
 - `limit` / `offset` (number) — Pagination
 - `sinceMinutesAgo` (number) — Time window filter
 
@@ -197,6 +200,7 @@ A job is stuck when its worker has shown no sign of life — claim or heartbeat 
 When recovering a stuck row, the row's `lease_token` is cleared. If the original (still-alive) worker later writes a result, its `WHERE id = $ AND lease_token = $` predicate fails — preventing it from clobbering whatever fresh execution has happened in the meantime.
 
 **Global vs scoped cleanup:**
+
 - Called on `Cron` instance: recovers **all** stuck jobs globally (no `tenant_id` filter).
 - Called on `CronTenantScope` (via `forTenant()`): recovers only that tenant's stuck jobs.
 
@@ -258,24 +262,24 @@ const jobs = await tenantA.fetchAll();
 
 **`CronTenantScope` methods:**
 
-| Method | Signature | Notes |
-|--------|-----------|-------|
-| `register` | `(name, expression, handler, options?) => Promise<CronJob>` | |
-| `unregister` | `(name) => Promise<void>` | |
-| `enable` | `(name) => Promise<CronJob>` | |
-| `disable` | `(name) => Promise<CronJob>` | |
-| `find` | `(name) => Promise<CronJob \| null>` | |
-| `fetchAll` | `(options?) => Promise<CronJob[]>` | |
-| `getRunHistory` | `(name, options?) => Promise<CronRunLog[]>` | |
-| `healthPreview` | `(sinceMinutesAgo?) => Promise<CronHealthPreviewRow[]>` | |
-| `cleanup` | `(maxMins?) => Promise<number>` | Tenant-scoped (only this tenant's stuck jobs) |
-| `pruneRunLog` | `(olderThanMinutes) => Promise<number>` | Tenant-scoped |
-| `setHandler` | `(name, handler) => CronTenantScope` | Chainable |
-| `hasHandler` | `(name) => boolean` | |
-| `listHandlerNames` | `() => string[]` | |
-| `removeHandler` | `(name) => CronTenantScope` | Chainable |
-| `onDone` | `(name, cb, skipIfExists?) => Unsubscriber` | |
-| `onError` | `(name, cb, skipIfExists?) => Unsubscriber` | |
+| Method             | Signature                                                   | Notes                                         |
+| ------------------ | ----------------------------------------------------------- | --------------------------------------------- |
+| `register`         | `(name, expression, handler, options?) => Promise<CronJob>` |                                               |
+| `unregister`       | `(name) => Promise<void>`                                   |                                               |
+| `enable`           | `(name) => Promise<CronJob>`                                |                                               |
+| `disable`          | `(name) => Promise<CronJob>`                                |                                               |
+| `find`             | `(name) => Promise<CronJob \| null>`                        |                                               |
+| `fetchAll`         | `(options?) => Promise<CronJob[]>`                          |                                               |
+| `getRunHistory`    | `(name, options?) => Promise<CronRunLog[]>`                 |                                               |
+| `healthPreview`    | `(sinceMinutesAgo?) => Promise<CronHealthPreviewRow[]>`     |                                               |
+| `cleanup`          | `(maxMins?) => Promise<number>`                             | Tenant-scoped (only this tenant's stuck jobs) |
+| `pruneRunLog`      | `(olderThanMinutes) => Promise<number>`                     | Tenant-scoped                                 |
+| `setHandler`       | `(name, handler) => CronTenantScope`                        | Chainable                                     |
+| `hasHandler`       | `(name) => boolean`                                         |                                               |
+| `listHandlerNames` | `() => string[]`                                            |                                               |
+| `removeHandler`    | `(name) => CronTenantScope`                                 | Chainable                                     |
+| `onDone`           | `(name, cb, skipIfExists?) => Unsubscriber`                 |                                               |
+| `onError`          | `(name, cb, skipIfExists?) => Unsubscriber`                 |                                               |
 
 The `tenantId` is available as a readonly property: `tenantA.tenantId`.
 
@@ -336,6 +340,7 @@ const registry = createTaskRegistry();
 Registers a task type. Throws if `taskType` is already defined.
 
 **Parameters:**
+
 - `taskType` (string) — Unique task type identifier
 - `definition` (TaskDefinition)
   - `handler` (CronHandler) — Required. The function to execute.
@@ -400,6 +405,7 @@ const bad = await registry.validate("send-report", {});
 Wires task registry handlers to a `Cron` instance and reconciles state.
 
 For each registered task type, calls `cron.setHandler(taskType, handler)`. Then:
+
 - Removes any in-memory handlers that no longer appear in the registry (`removedHandlers`).
 - Scans DB jobs in pages and reports those with no matching registry entry (`orphans`).
 
@@ -422,6 +428,7 @@ console.log("Stale handlers removed:", removedHandlers);
 ```
 
 **Returns:** `SyncRegistryResult`
+
 - `synced` (string[]) — Task types whose handlers were wired
 - `orphans` (string[]) — Job names in DB with no matching registry entry
 - `removedHandlers` (string[]) — In-memory handlers removed because they no longer appear in the registry
@@ -586,25 +593,25 @@ interface CronStopOptions {
 
 ### `CRON_STATUS`
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `IDLE` | `"idle"` | Job waiting for next scheduled run |
-| `RUNNING` | `"running"` | Job currently executing |
+| Key       | Value       | Description                        |
+| --------- | ----------- | ---------------------------------- |
+| `IDLE`    | `"idle"`    | Job waiting for next scheduled run |
+| `RUNNING` | `"running"` | Job currently executing            |
 
 ### `RUN_STATUS`
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `SUCCESS` | `"success"` | Execution completed successfully |
-| `ERROR` | `"error"` | Execution failed with an error |
+| Key       | Value       | Description                                  |
+| --------- | ----------- | -------------------------------------------- |
+| `SUCCESS` | `"success"` | Execution completed successfully             |
+| `ERROR`   | `"error"`   | Execution failed with an error               |
 | `TIMEOUT` | `"timeout"` | Execution exceeded `max_attempt_duration_ms` |
 
 ### `BACKOFF_STRATEGY`
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `NONE` | `"none"` | No delay between retries |
-| `EXP` | `"exp"` | Exponential backoff `2^attempt` seconds, **clamped at 5 min** |
+| Key    | Value    | Description                                                   |
+| ------ | -------- | ------------------------------------------------------------- |
+| `NONE` | `"none"` | No delay between retries                                      |
+| `EXP`  | `"exp"`  | Exponential backoff `2^attempt` seconds, **clamped at 5 min** |
 
 ---
 

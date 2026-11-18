@@ -6,8 +6,8 @@
  * state change callbacks.
  */
 
-import type pg from "pg";
 import type { Logger } from "@marianmeres/clog";
+import type pg from "pg";
 
 /**
  * Represents the result of a database health check.
@@ -45,7 +45,7 @@ export interface DbHealthStatus {
  */
 export async function checkDbHealth(
 	db: pg.Pool | pg.Client,
-	logger?: Logger
+	logger?: Logger,
 ): Promise<DbHealthStatus> {
 	const start = Date.now();
 	const timestamp = new Date();
@@ -122,7 +122,7 @@ export class DbHealthMonitor {
 			onUnhealthy?: (status: DbHealthStatus) => void;
 			/** Callback when database recovers */
 			onHealthy?: (status: DbHealthStatus) => void;
-		} = {}
+		} = {},
 	) {
 		this.#db = db;
 		this.#logger = options.logger;
@@ -198,7 +198,7 @@ export class DbHealthMonitor {
 		// Log if unhealthy
 		if (!status.healthy) {
 			this.#logger?.warn?.(
-				`DB health check failed (latency: ${status.latencyMs}ms): ${status.error}`
+				`DB health check failed (latency: ${status.latencyMs}ms): ${status.error}`,
 			);
 		}
 	}

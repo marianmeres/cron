@@ -35,7 +35,7 @@ export function sleep(
 	 * If calling directly `await sleep(x)` in a top level flow, this dance is not needed.
 	 */
 	__timeout_ref__: { id: number } = { id: -1 },
-	signal?: AbortSignal
+	signal?: AbortSignal,
 ): Promise<void> {
 	if (signal?.aborted) return Promise.resolve();
 
@@ -49,7 +49,7 @@ export function sleep(
 			signal?.removeEventListener("abort", onAbort);
 			clearTimeout(__timeout_ref__.id);
 			resolve(undefined);
-		// deno-lint-ignore no-explicit-any
+			// deno-lint-ignore no-explicit-any
 		}, timeout) as any;
 
 		signal?.addEventListener("abort", onAbort, { once: true });

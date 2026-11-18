@@ -1,4 +1,4 @@
-import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
+import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
 
 /**
  * Resets stuck `running` jobs back to `idle` (crash recovery).
@@ -23,7 +23,7 @@ import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
 export async function _markStale(
 	context: CronContext,
 	maxAllowedRunDurationMinutes: number = 5,
-	tenantScoped: boolean = false
+	tenantScoped: boolean = false,
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
@@ -45,7 +45,7 @@ export async function _markStale(
 				CRON_STATUS.RUNNING,
 				context.tenantId,
 				maxAllowedRunDurationMinutes,
-			]
+			],
 		);
 		return result.rowCount ?? 0;
 	}
@@ -64,7 +64,7 @@ export async function _markStale(
 			RUN_STATUS.ERROR,
 			CRON_STATUS.RUNNING,
 			maxAllowedRunDurationMinutes,
-		]
+		],
 	);
 	return result.rowCount ?? 0;
 }

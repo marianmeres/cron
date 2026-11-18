@@ -106,6 +106,7 @@ await withTx(context.db, async (client) => {
 ```
 
 Currently used in:
+
 - `_handle-success.ts` (UPDATE row + finalize run log)
 - `_handle-failure.ts` (UPDATE row)
 - `_schema.ts` `_initialize` / `_uninstall`
@@ -121,7 +122,7 @@ A single `pg.Client` is one session: every statement issued on it while a `withT
 
 When introducing new write paths against a claimed row, include the lease check.
 
-**Heartbeat.** The fence protects the *write*; the heartbeat protects the *execution*. `_startHeartbeat` (started and stopped by `_executeCronJob`, spanning the whole retry cycle) bumps `last_run_at` every `heartbeatIntervalMs` (default 30 s, `0` = off) `WHERE lease_token = $`. `_markStale` measures from `last_run_at`, so its threshold means "silent for N minutes", not "running for N minutes" — a live worker on a long job is never re-claimed. A beat that matches no row means the lease is lost: beating stops, the attempt's `AbortSignal` is aborted, remaining retries are skipped. The timer is unref'd (`unrefTimer`) so it never keeps the process alive. A hung handler in a live process keeps beating — bounding it is `max_attempt_duration_ms`'s job.
+**Heartbeat.** The fence protects the _write_; the heartbeat protects the _execution_. `_startHeartbeat` (started and stopped by `_executeCronJob`, spanning the whole retry cycle) bumps `last_run_at` every `heartbeatIntervalMs` (default 30 s, `0` = off) `WHERE lease_token = $`. `_markStale` measures from `last_run_at`, so its threshold means "silent for N minutes", not "running for N minutes" — a live worker on a long job is never re-claimed. A beat that matches no row means the lease is lost: beating stops, the attempt's `AbortSignal` is aborted, remaining retries are skipped. The timer is unref'd (`unrefTimer`) so it never keeps the process alive. A hung handler in a live process keeps beating — bounding it is `max_attempt_duration_ms`'s job.
 
 ### 5. AbortSignal propagation
 
@@ -173,7 +174,7 @@ The `CronParser.matches()` function uses **OR** when both DoM and DoW fields are
 
 ### 15. Lifecycle: `start()` / `stop()`
 
-**Generations.** Each `start()` → `stop()` span is one generation with its own `AbortController`. A processor loop runs `while (!shutdownSignal.aborted)` on the signal it was *started* with — never on instance state. `stop()` aborts the controller and drops it; the next `start()` creates a fresh one (a second `start()` without a `stop()` reuses the live one, so a single `stop()` reaches every processor).
+**Generations.** Each `start()` → `stop()` span is one generation with its own `AbortController`. A processor loop runs `while (!shutdownSignal.aborted)` on the signal it was _started_ with — never on instance state. `stop()` aborts the controller and drops it; the next `start()` creates a fresh one (a second `start()` without a `stop()` reuses the live one, so a single `stop()` reaches every processor).
 
 **`start()` rejects** (after logging) when schema init fails or while any `stop()` is draining (`#stopsInFlight > 0`). It attaches the SIGTERM listener (`gracefulSigterm`); `stop()` detaches it. Nothing at init time touches process signals.
 
@@ -190,6 +191,7 @@ Concurrent `stop()` calls (built-in SIGTERM listener + the app's own) each wait 
 ### 17. Task Registry
 
 The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefinition>`. It has no DB dependency. Key points:
+
 - `define()` throws on duplicate task type names
 - `list()` omits handlers (safe for API/UI serialization)
 - `validate()` dynamically imports `@marianmeres/modelize` **and** `@marianmeres/modelize/ajv` — since modelize v3 the core validates through Standard Schema only, so `ajvSchema()` adapts the plain JSON Schema document. Each import is optional and throws its own install hint (`ajv` is an optional peer dependency on npm). Returns `{ valid, errors }`, or `{ valid: true }` if no schema defined.
@@ -221,47 +223,51 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 ## DB Schema
 
 ### `__cron`
-| Column | Type | Notes |
-|--------|------|-------|
-| id | SERIAL PK | |
-| uid | UUID | gen_random_uuid() |
-| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default' |
-| name | VARCHAR(255) | NOT NULL |
-| expression | VARCHAR(100) | 5-field cron |
-| timezone | VARCHAR(64) | nullable; IANA tz name (default: host local) |
-| payload | JSONB | default `{}` |
-| enabled | BOOLEAN | default TRUE |
-| status | VARCHAR(20) | `idle \| running` (CHECK constraint) |
-| next_run_at | TIMESTAMPTZ | scheduled slot; only ever computed by `_register` / `_nextRunAt` |
-| last_run_at | TIMESTAMPTZ | last sign of life: claim, heartbeat, or completion — what stale recovery measures |
-| last_run_status | VARCHAR(20) | `success \| error \| timeout \| null` (CHECK) |
-| lease_token | UUID | per-claim fence; cleared on success/failure/stale |
-| max_attempts | INTEGER | default 1 (CHECK >= 1) |
-| max_attempt_duration_ms | INTEGER | 0 = disabled (CHECK >= 0) |
-| backoff_strategy | VARCHAR(20) | `none \| exp` |
-| created_at / updated_at | TIMESTAMPTZ | |
+
+| Column                  | Type         | Notes                                                                             |
+| ----------------------- | ------------ | --------------------------------------------------------------------------------- |
+| id                      | SERIAL PK    |                                                                                   |
+| uid                     | UUID         | gen_random_uuid()                                                                 |
+| tenant_id               | VARCHAR(255) | NOT NULL, DEFAULT '_default'                                                      |
+| name                    | VARCHAR(255) | NOT NULL                                                                          |
+| expression              | VARCHAR(100) | 5-field cron                                                                      |
+| timezone                | VARCHAR(64)  | nullable; IANA tz name (default: host local)                                      |
+| payload                 | JSONB        | default `{}`                                                                      |
+| enabled                 | BOOLEAN      | default TRUE                                                                      |
+| status                  | VARCHAR(20)  | `idle \| running` (CHECK constraint)                                              |
+| next_run_at             | TIMESTAMPTZ  | scheduled slot; only ever computed by `_register` / `_nextRunAt`                  |
+| last_run_at             | TIMESTAMPTZ  | last sign of life: claim, heartbeat, or completion — what stale recovery measures |
+| last_run_status         | VARCHAR(20)  | `success \| error \| timeout \| null` (CHECK)                                     |
+| lease_token             | UUID         | per-claim fence; cleared on success/failure/stale                                 |
+| max_attempts            | INTEGER      | default 1 (CHECK >= 1)                                                            |
+| max_attempt_duration_ms | INTEGER      | 0 = disabled (CHECK >= 0)                                                         |
+| backoff_strategy        | VARCHAR(20)  | `none \| exp`                                                                     |
+| created_at / updated_at | TIMESTAMPTZ  |                                                                                   |
 
 **Indexes:**
+
 - `UNIQUE (tenant_id, name)` — composite uniqueness
 - `(enabled, status, next_run_at)` — polling index (global, no tenant_id — processors claim across all tenants)
 
 ### `__cron_run_log`
-| Column | Type | Notes |
-|--------|------|-------|
-| id | SERIAL PK | |
-| cron_id | INTEGER FK | ON DELETE CASCADE |
-| cron_name | VARCHAR(255) | |
-| tenant_id | VARCHAR(255) | NOT NULL, DEFAULT '_default'; always the job's `tenant_id` |
-| scheduled_at | TIMESTAMPTZ | next_run_at captured at claim time |
-| started_at | TIMESTAMPTZ | |
-| completed_at | TIMESTAMPTZ | nullable |
-| attempt_number | INTEGER | 1-based (CHECK >= 1) |
-| status | VARCHAR(20) | `success \| error \| timeout` (CHECK) |
-| result | JSONB | handler return value |
-| error_message | TEXT | |
-| error_details | JSONB | `{ stack }` |
+
+| Column         | Type         | Notes                                                      |
+| -------------- | ------------ | ---------------------------------------------------------- |
+| id             | SERIAL PK    |                                                            |
+| cron_id        | INTEGER FK   | ON DELETE CASCADE                                          |
+| cron_name      | VARCHAR(255) |                                                            |
+| tenant_id      | VARCHAR(255) | NOT NULL, DEFAULT '_default'; always the job's `tenant_id` |
+| scheduled_at   | TIMESTAMPTZ  | next_run_at captured at claim time                         |
+| started_at     | TIMESTAMPTZ  |                                                            |
+| completed_at   | TIMESTAMPTZ  | nullable                                                   |
+| attempt_number | INTEGER      | 1-based (CHECK >= 1)                                       |
+| status         | VARCHAR(20)  | `success \| error \| timeout` (CHECK)                      |
+| result         | JSONB        | handler return value                                       |
+| error_message  | TEXT         |                                                            |
+| error_details  | JSONB        | `{ stack }`                                                |
 
 **Indexes:**
+
 - `(cron_id)` — FK lookups
 - `(started_at DESC)` — history queries
 - `(tenant_id)` — per-tenant log queries
@@ -269,6 +275,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 ### Migration
 
 `Cron.migrate(db, tablePrefix?)` is the single migration entry point. Runs in a real transaction (works on Pool). Idempotent. Currently bundles:
+
 - legacy → current: rename the pre-rename `project_id` column + its indexes to `tenant_id` in place (guarded `DO` block + `ALTER INDEX IF EXISTS`); preserves data. The only place the legacy `project_id` literal is still allowed to appear.
 - v1 → v2: add `tenant_id` columns + reshape indexes
 - v2 → v3: add `lease_token` and `timezone` columns + add CHECK constraints
@@ -299,7 +306,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 
 ### Avoiding leaked timers in tests with abandoned handlers
 
-When a test deliberately stops the cron *before* an in-flight handler returns (e.g. testing `drainTimeoutMs`), Deno's leak detector (`pnpm run test:deno`) will flag the still-running setTimeout from the handler, and under `node --test` the timer keeps the file's process alive until it fires. Patterns:
+When a test deliberately stops the cron _before_ an in-flight handler returns (e.g. testing `drainTimeoutMs`), Deno's leak detector (`pnpm run test:deno`) will flag the still-running setTimeout from the handler, and under `node --test` the timer keeps the file's process alive until it fires. Patterns:
 
 1. Pass a `__timeout_ref__` ref into the handler's `sleep(ms, ref)` so the test can `clearTimeout(ref.id)` before exiting.
 2. Wait long enough at the end of the test for the abandoned timer to fire naturally (e.g. handler sleep 700ms, test trailing sleep 800ms).

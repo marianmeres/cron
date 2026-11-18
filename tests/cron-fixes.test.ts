@@ -16,21 +16,21 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Logger } from "@marianmeres/clog";
+import type pg from "pg";
+import { _backoffMs, DEFAULT_MAX_BACKOFF_MS } from "../src/cron/_handle-failure.ts";
+import { sleep } from "../src/cron/utils/sleep.ts";
+import { TimeoutError, withTimeout } from "../src/cron/utils/with-timeout.ts";
+import { withTx } from "../src/cron/utils/with-tx.ts";
 import {
-	Cron,
 	CRON_STATUS,
+	Cron,
+	type CronJob,
 	createTaskRegistry,
 	RUN_STATUS,
 	syncRegistryToCron,
-	type CronJob,
 } from "../src/mod.ts";
-import { sleep } from "../src/cron/utils/sleep.ts";
-import { withTx } from "../src/cron/utils/with-tx.ts";
-import { withTimeout, TimeoutError } from "../src/cron/utils/with-timeout.ts";
-import { _backoffMs, DEFAULT_MAX_BACKOFF_MS } from "../src/cron/_handle-failure.ts";
 import { createPg } from "./_pg.ts";
-import type pg from "pg";
-import type { Logger } from "@marianmeres/clog";
 
 const TABLE_PREFIX = "_test_";
 const POLL = 50;
@@ -72,14 +72,14 @@ async function backdate(db: pg.Pool, name: string, msAgo = 100) {
 		`UPDATE ${TABLE_PREFIX}__cron
 		 SET next_run_at = NOW() - ($1 * INTERVAL '1 millisecond')
 		 WHERE name = $2`,
-		[msAgo, name]
+		[msAgo, name],
 	);
 }
 
 async function fetchJob(db: pg.Pool, name: string) {
 	const { rows } = await db.query(
 		`SELECT * FROM ${TABLE_PREFIX}__cron WHERE name = $1`,
-		[name]
+		[name],
 	);
 	return rows[0];
 }
@@ -94,13 +94,15 @@ test("B1: withTx commits all writes on the same connection", async () => {
 		await withTx(db, async (client) => {
 			await client.query(`CREATE TEMP TABLE _tx_probe (v INT) ON COMMIT DROP`);
 			await client.query(`INSERT INTO _tx_probe VALUES (1), (2), (3)`);
-			const { rows } = await client.query(`SELECT COUNT(*)::int AS n FROM _tx_probe`);
+			const { rows } = await client.query(
+				`SELECT COUNT(*)::int AS n FROM _tx_probe`,
+			);
 			assert.deepStrictEqual(rows[0].n, 3);
 		});
 		// After commit, the temp table is gone (ON COMMIT DROP). A different
 		// pool checkout proves the table no longer exists.
 		const { rows } = await db.query(
-			`SELECT to_regclass('_tx_probe') IS NULL AS gone`
+			`SELECT to_regclass('_tx_probe') IS NULL AS gone`,
 		);
 		assert.deepStrictEqual(rows[0].gone, true);
 	} finally {
@@ -126,7 +128,7 @@ test("B1: withTx rolls back on error", async () => {
 		}
 
 		const { rows } = await db.query(
-			`SELECT COUNT(*)::int AS n FROM _tx_rollback_probe`
+			`SELECT COUNT(*)::int AS n FROM _tx_rollback_probe`,
 		);
 		assert.deepStrictEqual(rows[0].n, 0, "insert must have been rolled back");
 
@@ -140,54 +142,55 @@ test("B1: withTx rolls back on error", async () => {
 // B5: lease token prevents stale-recovered worker from clobbering
 // =========================================================================
 
-test(
-	"B5: stale-recovered worker cannot overwrite fresh claim's result",
-	async () => {
-		const { db, cron } = await setup();
-		try {
-			await cron.register("racy", "* * * * *", async () => "fresh");
+test("B5: stale-recovered worker cannot overwrite fresh claim's result", async () => {
+	const { db, cron } = await setup();
+	try {
+		await cron.register("racy", "* * * * *", async () => "fresh");
 
-			// Manually pretend a worker claimed the job a long time ago, with a
-			// known lease_token that will get cleared by cleanup().
-			const oldToken = "11111111-1111-1111-1111-111111111111";
-			await db.query(
-				`UPDATE ${TABLE_PREFIX}__cron
+		// Manually pretend a worker claimed the job a long time ago, with a
+		// known lease_token that will get cleared by cleanup().
+		const oldToken = "11111111-1111-1111-1111-111111111111";
+		await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
 				 SET status = 'running',
 				     last_run_at = NOW() - INTERVAL '10 minutes',
 				     lease_token = $1
 				 WHERE name = 'racy'`,
-				[oldToken]
-			);
+			[oldToken],
+		);
 
-			// Stale recovery: clears lease_token, sets next_run_at = NOW()
-			const recovered = await cron.cleanup(5);
-			assert.deepStrictEqual(recovered, 1);
+		// Stale recovery: clears lease_token, sets next_run_at = NOW()
+		const recovered = await cron.cleanup(5);
+		assert.deepStrictEqual(recovered, 1);
 
-			// Now the (still-alive) old worker tries to write its result via
-			// _handleCronSuccess. We simulate that by running the same UPDATE
-			// _handleCronSuccess would issue, with the OLD lease token.
-			const { rowCount } = await db.query(
-				`UPDATE ${TABLE_PREFIX}__cron
+		// Now the (still-alive) old worker tries to write its result via
+		// _handleCronSuccess. We simulate that by running the same UPDATE
+		// _handleCronSuccess would issue, with the OLD lease token.
+		const { rowCount } = await db.query(
+			`UPDATE ${TABLE_PREFIX}__cron
 				 SET status = 'idle',
 				     last_run_status = 'success',
 				     next_run_at = NOW() + INTERVAL '99 years',
 				     lease_token = NULL
 				 WHERE name = 'racy' AND lease_token = $1`,
-				[oldToken]
-			);
-			assert.deepStrictEqual(rowCount, 0, "stale write must be rejected by lease fence");
+			[oldToken],
+		);
+		assert.deepStrictEqual(
+			rowCount,
+			0,
+			"stale write must be rejected by lease fence",
+		);
 
-			const row = await fetchJob(db, "racy");
-			// next_run_at must NOT be 99 years in the future
-			assert.ok(
-				new Date(row.next_run_at).getFullYear() < 2050,
-				"next_run_at must reflect cleanup, not the stale write"
-			);
-		} finally {
-			await teardown(cron, db);
-		}
+		const row = await fetchJob(db, "racy");
+		// next_run_at must NOT be 99 years in the future
+		assert.ok(
+			new Date(row.next_run_at).getFullYear() < 2050,
+			"next_run_at must reflect cleanup, not the stale write",
+		);
+	} finally {
+		await teardown(cron, db);
 	}
-);
+});
 
 test("B5: lease token is set on claim, cleared on success", async () => {
 	const { db, cron } = await setup();
@@ -200,7 +203,11 @@ test("B5: lease token is set on claim, cleared on success", async () => {
 
 		const row = await fetchJob(db, "lease-job");
 		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.SUCCESS);
-		assert.deepStrictEqual(row.lease_token, null, "lease_token must be cleared after success");
+		assert.deepStrictEqual(
+			row.lease_token,
+			null,
+			"lease_token must be cleared after success",
+		);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -210,41 +217,38 @@ test("B5: lease token is set on claim, cleared on success", async () => {
 // B4: onEvent wrap cache — first-unsub-kills-others bug + duplicate wrap
 // =========================================================================
 
-test(
-	"B4: subscribing to multiple names then unsubscribing once detaches all",
-	async () => {
-		const { db, cron } = await setup();
-		try {
-			await cron.register("evt-a", "* * * * *", async () => "a");
-			await cron.register("evt-b", "* * * * *", async () => "b");
+test("B4: subscribing to multiple names then unsubscribing once detaches all", async () => {
+	const { db, cron } = await setup();
+	try {
+		await cron.register("evt-a", "* * * * *", async () => "a");
+		await cron.register("evt-b", "* * * * *", async () => "b");
 
-			let calls = 0;
-			const cb = (_job: CronJob) => {
-				calls++;
-			};
+		let calls = 0;
+		const cb = (_job: CronJob) => {
+			calls++;
+		};
 
-			const unsub = cron.onDone(["evt-a", "evt-b"], cb);
+		const unsub = cron.onDone(["evt-a", "evt-b"], cb);
 
-			// Re-subscribe BEFORE unsubscribing — should NOT create a duplicate
-			cron.onDone(["evt-a"], cb);
+		// Re-subscribe BEFORE unsubscribing — should NOT create a duplicate
+		cron.onDone(["evt-a"], cb);
 
-			await backdate(db, "evt-a");
-			await backdate(db, "evt-b");
+		await backdate(db, "evt-a");
+		await backdate(db, "evt-b");
 
-			await cron.start(1);
-			await sleep(400);
+		await cron.start(1);
+		await sleep(400);
 
-			// Each job fires once; cb should be invoked at most once per job
-			assert.deepStrictEqual(calls, 2, `expected 2 events, got ${calls}`);
+		// Each job fires once; cb should be invoked at most once per job
+		assert.deepStrictEqual(calls, 2, `expected 2 events, got ${calls}`);
 
-			unsub();
-			// After unsub of the first batch, only the explicit "evt-a" subscription
-			// from the second call could remain; per the dedup logic both should be gone.
-		} finally {
-			await teardown(cron, db);
-		}
+		unsub();
+		// After unsub of the first batch, only the explicit "evt-a" subscription
+		// from the second call could remain; per the dedup logic both should be gone.
+	} finally {
+		await teardown(cron, db);
 	}
-);
+});
 
 test("B4: handler exception in onDone does not kill processor", async () => {
 	const { db, cron } = await setup();
@@ -293,7 +297,7 @@ test("B6: stop({ drainTimeoutMs }) returns within the cap", async () => {
 		const elapsed = Date.now() - started;
 		assert.ok(
 			elapsed < 600,
-			`stop should return within ~drainTimeoutMs, took ${elapsed}ms`
+			`stop should return within ~drainTimeoutMs, took ${elapsed}ms`,
 		);
 
 		// Wait long enough for the abandoned handler timer to fire,
@@ -341,7 +345,7 @@ test("D1: withTimeout aborts the controller on timeout", async () => {
 		() => sleep(2_000, undefined, ctrl.signal),
 		20,
 		"too slow",
-		ctrl
+		ctrl,
 	);
 
 	let caught: unknown = null;
@@ -372,14 +376,18 @@ test("D2: autoCleanup recovers stuck jobs on a timer", async () => {
 			`UPDATE ${TABLE_PREFIX}__cron
 			 SET status = 'running',
 			     last_run_at = NOW() - INTERVAL '5 minutes'
-			 WHERE name = 'autoclean'`
+			 WHERE name = 'autoclean'`,
 		);
 
 		await cron.start(1);
 		await sleep(350); // > intervalMs
 
 		const row = await fetchJob(db, "autoclean");
-		assert.deepStrictEqual(row.status, CRON_STATUS.IDLE, "autoCleanup must recover the job");
+		assert.deepStrictEqual(
+			row.status,
+			CRON_STATUS.IDLE,
+			"autoCleanup must recover the job",
+		);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -419,7 +427,7 @@ test("pruneRunLog: deletes only old rows, returns count", async () => {
 		await db.query(
 			`UPDATE ${TABLE_PREFIX}__cron_run_log
 			 SET started_at = NOW() - INTERVAL '120 minutes'
-			 WHERE cron_name = 'prune'`
+			 WHERE cron_name = 'prune'`,
 		);
 
 		const deleted = await cron.pruneRunLog(60); // older than 60min
@@ -436,36 +444,33 @@ test("pruneRunLog: deletes only old rows, returns count", async () => {
 // sync-registry: removes orphan handlers
 // =========================================================================
 
-test(
-	"sync-registry: removeHandler called for in-memory handlers no longer in registry",
-	async () => {
-		const db = createPg();
-		const cron = new Cron({
-			db,
-			tablePrefix: TABLE_PREFIX,
-			pollTimeoutMs: POLL,
-			gracefulSigterm: false,
-			logger: noopLogger,
-		});
-		await cron.resetHard();
+test("sync-registry: removeHandler called for in-memory handlers no longer in registry", async () => {
+	const db = createPg();
+	const cron = new Cron({
+		db,
+		tablePrefix: TABLE_PREFIX,
+		pollTimeoutMs: POLL,
+		gracefulSigterm: false,
+		logger: noopLogger,
+	});
+	await cron.resetHard();
 
-		try {
-			// Pre-existing in-memory handler that won't be in the registry
-			cron.setHandler("ghost", async () => "ghost");
-			assert.ok(cron.hasHandler("ghost"));
+	try {
+		// Pre-existing in-memory handler that won't be in the registry
+		cron.setHandler("ghost", async () => "ghost");
+		assert.ok(cron.hasHandler("ghost"));
 
-			const registry = createTaskRegistry();
-			registry.define("real", { handler: async () => "real" });
+		const registry = createTaskRegistry();
+		registry.define("real", { handler: async () => "real" });
 
-			const { synced, removedHandlers } = await syncRegistryToCron(cron, registry);
+		const { synced, removedHandlers } = await syncRegistryToCron(cron, registry);
 
-			assert.ok(synced.includes("real"));
-			assert.ok(removedHandlers.includes("ghost"));
-			assert.ok(!cron.hasHandler("ghost"), "ghost handler must be removed");
-			assert.ok(cron.hasHandler("real"));
-		} finally {
-			await cron.stop();
-			await db.end();
-		}
+		assert.ok(synced.includes("real"));
+		assert.ok(removedHandlers.includes("ghost"));
+		assert.ok(!cron.hasHandler("ghost"), "ghost handler must be removed");
+		assert.ok(cron.hasHandler("real"));
+	} finally {
+		await cron.stop();
+		await db.end();
 	}
-);
+});

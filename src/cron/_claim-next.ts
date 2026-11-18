@@ -13,7 +13,7 @@ import { CRON_STATUS, type CronContext, type CronJob } from "./cron.ts";
  * @returns The claimed CronJob and its `lease_token`, or `null` if nothing is due
  */
 export async function _claimNextCronJob(
-	context: CronContext
+	context: CronContext,
 ): Promise<{ job: CronJob; leaseToken: string } | null> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
@@ -34,7 +34,7 @@ export async function _claimNextCronJob(
 			LIMIT 1
 		)
 		RETURNING *`,
-		[CRON_STATUS.RUNNING, CRON_STATUS.IDLE]
+		[CRON_STATUS.RUNNING, CRON_STATUS.IDLE],
 	);
 
 	const row = result.rows[0] as (CronJob & { lease_token: string }) | undefined;

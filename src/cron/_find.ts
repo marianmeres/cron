@@ -1,16 +1,16 @@
-import { type CronContext, type CronJob } from "./cron.ts";
+import type { CronContext, CronJob } from "./cron.ts";
 
 /** Finds a cron job by name (scoped to tenant). Returns `null` if not found. */
 export async function _findByName(
 	context: CronContext,
-	name: string
+	name: string,
 ): Promise<CronJob | null> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
 	const { rows } = await db.query(
 		`SELECT * FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
-		[context.tenantId, name]
+		[context.tenantId, name],
 	);
 
 	return (rows[0] as CronJob) ?? null;
@@ -30,7 +30,7 @@ export interface FetchAllOptions {
 /** Fetches all cron jobs (scoped to tenant) with optional filters and pagination. */
 export async function _fetchAll(
 	context: CronContext,
-	options: FetchAllOptions = {}
+	options: FetchAllOptions = {},
 ): Promise<CronJob[]> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;

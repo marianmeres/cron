@@ -1,8 +1,8 @@
-import { createClog, type Logger } from "@marianmeres/clog";
-import { createPubSub, type Subscriber, type Unsubscriber } from "@marianmeres/pubsub";
 import process from "node:process";
-import type pg from "pg";
+import { createClog, type Logger } from "@marianmeres/clog";
 import { CronParser } from "@marianmeres/cron-parser";
+import { createPubSub, type Subscriber, type Unsubscriber } from "@marianmeres/pubsub";
+import type pg from "pg";
 import { _claimNextCronJob } from "./_claim-next.ts";
 import { _executeCronJob } from "./_execute.ts";
 import { _fetchAll, _findByName } from "./_find.ts";
@@ -11,20 +11,15 @@ import { _logRunFetchAll, _logRunPrune } from "./_log-run.ts";
 import { _markStale } from "./_mark-stale.ts";
 import { _nextRunAt } from "./_next-run.ts";
 import { _register } from "./_register.ts";
-import {
-	_initialize,
-	_schemaCreate,
-	_schemaDrop,
-	_uninstall,
-} from "./_schema.ts";
-import { sleep } from "./utils/sleep.ts";
-import { withDbRetry, type DbRetryOptions } from "./utils/with-db-retry.ts";
-import { isPool } from "./utils/with-tx.ts";
+import { _initialize, _schemaCreate, _schemaDrop, _uninstall } from "./_schema.ts";
 import {
 	checkDbHealth,
 	DbHealthMonitor,
 	type DbHealthStatus,
 } from "./utils/db-health.ts";
+import { sleep } from "./utils/sleep.ts";
+import { type DbRetryOptions, withDbRetry } from "./utils/with-db-retry.ts";
+import { isPool } from "./utils/with-tx.ts";
 
 /**
  * Default tenant identifier used when no `tenantId` is specified.
@@ -293,7 +288,7 @@ export interface CronTenantScope {
 		name: string,
 		expression: string,
 		handler: CronHandler,
-		options?: CronRegisterOptions
+		options?: CronRegisterOptions,
 	): Promise<CronJob>;
 	unregister(name: string): Promise<void>;
 	enable(name: string): Promise<CronJob>;
@@ -307,7 +302,7 @@ export interface CronTenantScope {
 	}): Promise<CronJob[]>;
 	getRunHistory(
 		name: string,
-		options?: { limit?: number; offset?: number; sinceMinutesAgo?: number }
+		options?: { limit?: number; offset?: number; sinceMinutesAgo?: number },
 	): Promise<CronRunLog[]>;
 	healthPreview(sinceMinutesAgo?: number): Promise<CronHealthPreviewRow[]>;
 	cleanup(maxAllowedRunDurationMinutes?: number): Promise<number>;
@@ -319,12 +314,12 @@ export interface CronTenantScope {
 	onDone(
 		name: string | string[],
 		cb: (job: CronJob) => void,
-		skipIfExists?: boolean
+		skipIfExists?: boolean,
 	): Unsubscriber;
 	onError(
 		name: string | string[],
 		cb: (job: CronJob) => void,
-		skipIfExists?: boolean
+		skipIfExists?: boolean,
 	): Unsubscriber;
 }
 
@@ -401,7 +396,10 @@ export class Cron {
 	#heartbeatIntervalMs: number;
 
 	#autoCleanupTimer: ReturnType<typeof setInterval> | null = null;
-	#autoCleanupConfig: { intervalMs: number; maxAllowedRunDurationMinutes: number } | null = null;
+	#autoCleanupConfig: {
+		intervalMs: number;
+		maxAllowedRunDurationMinutes: number;
+	} | null = null;
 
 	constructor(options: CronOptions) {
 		const {
@@ -532,7 +530,7 @@ export class Cron {
 				this.#claimErrorCounter++;
 				if (this.#claimErrorCounter < limit) {
 					this.#logger?.error?.(
-						`Cron claim: ${e instanceof Error ? e.stack ?? e.message : e}`
+						`Cron claim: ${e instanceof Error ? (e.stack ?? e.message) : e}`,
 					);
 				} else if (this.#claimErrorCounter === limit) {
 					this.#logger?.debug?.(`Cron claim error reporting MUTED...`);
@@ -553,11 +551,11 @@ export class Cron {
 				const handler = this.#handlers.get(key);
 				if (!handler) {
 					this.#logger?.warn?.(
-						`No handler for cron job "${job.name}" (tenant: ${job.tenant_id}), using noop`
+						`No handler for cron job "${job.name}" (tenant: ${job.tenant_id}), using noop`,
 					);
 				}
 				this.#logger?.debug?.(
-					`Executing cron job "${job.name}" (tenant: ${job.tenant_id})...`
+					`Executing cron job "${job.name}" (tenant: ${job.tenant_id})...`,
 				);
 				await _executeCronJob(
 					this.#context,
@@ -568,7 +566,7 @@ export class Cron {
 					{
 						withRetry: <T>(fn: () => Promise<T>) => this.#withRetry(fn),
 						heartbeatIntervalMs: this.#heartbeatIntervalMs,
-					}
+					},
 				);
 			} catch (e: unknown) {
 				// Handler errors never reach here (they are recorded as failed
@@ -576,8 +574,8 @@ export class Cron {
 				this.#logger?.error?.(
 					`Cron job "${job.name}" (tenant: ${job.tenant_id}): could not record the run; ` +
 						`the row stays "running" until cleanup() recovers it: ${
-							e instanceof Error ? e.stack ?? e.message : e
-						}`
+							e instanceof Error ? (e.stack ?? e.message) : e
+						}`,
 				);
 				await pause();
 			} finally {
@@ -595,7 +593,7 @@ export class Cron {
 		name: string,
 		expression: string,
 		handler: CronHandler,
-		options: CronRegisterOptions = {}
+		options: CronRegisterOptions = {},
 	): Promise<CronJob> {
 		const {
 			payload = {},
@@ -626,7 +624,7 @@ export class Cron {
 				max_attempt_duration_ms,
 				backoff_strategy,
 			},
-			forceNextRunRecalculate
+			forceNextRunRecalculate,
 		);
 	}
 
@@ -634,10 +632,10 @@ export class Cron {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
-		await db.query(
-			`DELETE FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
-			[tenantId, name]
-		);
+		await db.query(`DELETE FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`, [
+			tenantId,
+			name,
+		]);
 		this.#handlers.delete(this.#handlerKey(tenantId, name));
 	}
 
@@ -653,7 +651,8 @@ export class Cron {
 		// conditions atomically, so enabling an already-enabled job that is
 		// merely due never loses that run.
 		const current = await _findByName(ctx, name);
-		const resumeAt = current && !current.enabled ? _nextRunAt(current, new Date()) : null;
+		const resumeAt =
+			current && !current.enabled ? _nextRunAt(current, new Date()) : null;
 
 		const { rows } = await db.query(
 			`UPDATE ${tableCron}
@@ -666,7 +665,7 @@ export class Cron {
 				updated_at  = NOW()
 			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
-			[tenantId, name, resumeAt]
+			[tenantId, name, resumeAt],
 		);
 		return rows[0] as CronJob;
 	}
@@ -680,7 +679,7 @@ export class Cron {
 			SET enabled = FALSE, updated_at = NOW()
 			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
-			[tenantId, name]
+			[tenantId, name],
 		);
 		return rows[0] as CronJob;
 	}
@@ -697,7 +696,7 @@ export class Cron {
 			status?: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
 			limit?: number;
 			offset?: number;
-		} = {}
+		} = {},
 	): Promise<CronJob[]> {
 		await this.#initializeOnce();
 		return await _fetchAll(this.#tenantContext(tenantId), options);
@@ -706,7 +705,7 @@ export class Cron {
 	async #doGetRunHistory(
 		tenantId: string,
 		name: string,
-		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
+		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {},
 	): Promise<CronRunLog[]> {
 		await this.#initializeOnce();
 		const ctx = this.#tenantContext(tenantId);
@@ -717,7 +716,7 @@ export class Cron {
 
 	async #doHealthPreview(
 		tenantId: string,
-		sinceMinutesAgo: number = 60
+		sinceMinutesAgo: number = 60,
 	): Promise<CronHealthPreviewRow[]> {
 		await this.#initializeOnce();
 		return await _healthPreview(this.#tenantContext(tenantId), sinceMinutesAgo);
@@ -726,33 +725,33 @@ export class Cron {
 	async #doCleanup(
 		tenantId: string,
 		maxAllowedRunDurationMinutes: number = 5,
-		tenantScoped: boolean = true
+		tenantScoped: boolean = true,
 	): Promise<number> {
 		await this.#initializeOnce();
 		return await _markStale(
 			this.#tenantContext(tenantId),
 			maxAllowedRunDurationMinutes,
-			tenantScoped
+			tenantScoped,
 		);
 	}
 
 	async #doPruneRunLog(
 		tenantId: string,
 		olderThanMinutes: number,
-		tenantScoped: boolean
+		tenantScoped: boolean,
 	): Promise<number> {
 		await this.#initializeOnce();
 		return await _logRunPrune(
 			this.#tenantContext(tenantId),
 			olderThanMinutes,
-			tenantScoped
+			tenantScoped,
 		);
 	}
 
 	#doSetHandler(
 		tenantId: string,
 		name: string,
-		handler: CronHandler | undefined | null
+		handler: CronHandler | undefined | null,
 	): void {
 		const key = this.#handlerKey(tenantId, name);
 		if (typeof handler === "function") {
@@ -790,7 +789,7 @@ export class Cron {
 		pubsub: ReturnType<typeof createPubSub>,
 		name: string | string[],
 		cb: (job: CronJob) => void,
-		skipIfExists: boolean
+		skipIfExists: boolean,
 	): Unsubscriber {
 		const names = Array.isArray(name) ? name : [name];
 
@@ -928,7 +927,7 @@ export class Cron {
 				});
 			}, intervalMs);
 			this.#logger?.debug?.(
-				`Auto-cleanup enabled (every ${intervalMs}ms, threshold ${maxAllowedRunDurationMinutes}min)`
+				`Auto-cleanup enabled (every ${intervalMs}ms, threshold ${maxAllowedRunDurationMinutes}min)`,
 			);
 		}
 
@@ -953,7 +952,7 @@ export class Cron {
 			if (count > allowed) {
 				this.#logger?.warn?.(
 					`A single pg.Client can serve only one processor; starting ${allowed} ` +
-						`instead of ${count}. Pass a pg.Pool to run concurrent processors.`
+						`instead of ${count}. Pass a pg.Pool to run concurrent processors.`,
 				);
 				count = allowed;
 			}
@@ -1013,7 +1012,7 @@ export class Cron {
 			if (drainTimeoutMs > 0) {
 				const drainCtrl = new AbortController();
 				const cap = sleep(drainTimeoutMs, undefined, drainCtrl.signal).then(
-					() => false
+					() => false,
 				);
 				allDone = await Promise.race([processorsDone, cap]);
 				// If processors won the race, abort the cap sleep so its timer is cleared.
@@ -1028,7 +1027,7 @@ export class Cron {
 				this.#logger?.error?.(
 					`Drain timeout (${drainTimeoutMs}ms) exceeded; ` +
 						`abandoning ${this.#activeJobs.size} in-flight job(s): ` +
-						`[${[...this.#activeJobs].join(", ")}]`
+						`[${[...this.#activeJobs].join(", ")}]`,
 				);
 			}
 			this.#jobProcessors = [];
@@ -1077,14 +1076,14 @@ export class Cron {
 		name: string,
 		expression: string,
 		handler: CronHandler,
-		options: CronRegisterOptions = {}
+		options: CronRegisterOptions = {},
 	): Promise<CronJob> {
 		return await this.#doRegister(
 			this.#context.tenantId,
 			name,
 			expression,
 			handler,
-			options
+			options,
 		);
 	}
 
@@ -1138,7 +1137,7 @@ export class Cron {
 			status?: typeof CRON_STATUS.IDLE | typeof CRON_STATUS.RUNNING;
 			limit?: number;
 			offset?: number;
-		} = {}
+		} = {},
 	): Promise<CronJob[]> {
 		return await this.#doFetchAll(this.#context.tenantId, options);
 	}
@@ -1150,7 +1149,7 @@ export class Cron {
 	 */
 	async getRunHistory(
 		name: string,
-		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {}
+		options: { limit?: number; offset?: number; sinceMinutesAgo?: number } = {},
 	): Promise<CronRunLog[]> {
 		return await this.#doGetRunHistory(this.#context.tenantId, name, options);
 	}
@@ -1175,7 +1174,7 @@ export class Cron {
 		return await this.#doCleanup(
 			this.#context.tenantId,
 			maxAllowedRunDurationMinutes,
-			false // tenantScoped = false → global recovery
+			false, // tenantScoped = false → global recovery
 		);
 	}
 
@@ -1191,7 +1190,7 @@ export class Cron {
 		return await this.#doPruneRunLog(
 			this.#context.tenantId,
 			olderThanMinutes,
-			false // global
+			false, // global
 		);
 	}
 
@@ -1214,14 +1213,14 @@ export class Cron {
 	onDone(
 		name: string | string[],
 		cb: (job: CronJob) => void,
-		skipIfExists: boolean = true
+		skipIfExists: boolean = true,
 	): Unsubscriber {
 		return this.#doOnEvent(
 			this.#context.tenantId,
 			this.#pubsubDone,
 			name,
 			cb,
-			skipIfExists
+			skipIfExists,
 		);
 	}
 
@@ -1233,14 +1232,14 @@ export class Cron {
 	onError(
 		name: string | string[],
 		cb: (job: CronJob) => void,
-		skipIfExists: boolean = true
+		skipIfExists: boolean = true,
 	): Unsubscriber {
 		return this.#doOnEvent(
 			this.#context.tenantId,
 			this.#pubsubError,
 			name,
 			cb,
-			skipIfExists
+			skipIfExists,
 		);
 	}
 
@@ -1299,9 +1298,21 @@ export class Cron {
 				return this;
 			},
 			onDone: (name, cb, skipIfExists?) =>
-				self.#doOnEvent(tenantId, self.#pubsubDone, name, cb, skipIfExists ?? true),
+				self.#doOnEvent(
+					tenantId,
+					self.#pubsubDone,
+					name,
+					cb,
+					skipIfExists ?? true,
+				),
 			onError: (name, cb, skipIfExists?) =>
-				self.#doOnEvent(tenantId, self.#pubsubError, name, cb, skipIfExists ?? true),
+				self.#doOnEvent(
+					tenantId,
+					self.#pubsubError,
+					name,
+					cb,
+					skipIfExists ?? true,
+				),
 		};
 	}
 
@@ -1338,7 +1349,7 @@ export class Cron {
 	 */
 	static async migrate(
 		db: pg.Pool | pg.Client,
-		tablePrefix: string = ""
+		tablePrefix: string = "",
 	): Promise<void> {
 		const { tableCron, tableCronRunLog } = _tableNames(tablePrefix);
 		const safe = (name: string) => `${name}`.replace(/\W/g, "");
@@ -1448,15 +1459,15 @@ export class Cron {
 			const addCheckIfMissing = async (
 				table: string,
 				name: string,
-				expr: string
+				expr: string,
 			) => {
 				const exists = await client.query(
 					`SELECT 1 FROM pg_constraint WHERE conname = $1`,
-					[name]
+					[name],
 				);
 				if (exists.rowCount === 0) {
 					await client.query(
-						`ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`
+						`ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`,
 					);
 				}
 			};
@@ -1464,32 +1475,32 @@ export class Cron {
 			await addCheckIfMissing(
 				tableCron,
 				`chk_${safe(tableCron)}_status`,
-				`status IN (${okCronStatuses})`
+				`status IN (${okCronStatuses})`,
 			);
 			await addCheckIfMissing(
 				tableCron,
 				`chk_${safe(tableCron)}_last_status`,
-				`last_run_status IS NULL OR last_run_status IN (${okRunStatuses})`
+				`last_run_status IS NULL OR last_run_status IN (${okRunStatuses})`,
 			);
 			await addCheckIfMissing(
 				tableCron,
 				`chk_${safe(tableCron)}_max_attempts`,
-				`max_attempts >= 1`
+				`max_attempts >= 1`,
 			);
 			await addCheckIfMissing(
 				tableCron,
 				`chk_${safe(tableCron)}_max_attempt_duration`,
-				`max_attempt_duration_ms >= 0`
+				`max_attempt_duration_ms >= 0`,
 			);
 			await addCheckIfMissing(
 				tableCronRunLog,
 				`chk_${safe(tableCronRunLog)}_status`,
-				`status IS NULL OR status IN (${okRunStatuses})`
+				`status IS NULL OR status IN (${okRunStatuses})`,
 			);
 			await addCheckIfMissing(
 				tableCronRunLog,
 				`chk_${safe(tableCronRunLog)}_attempt_number`,
-				`attempt_number >= 1`
+				`attempt_number >= 1`,
 			);
 		});
 	}

@@ -1,5 +1,5 @@
 import { CronParser } from "@marianmeres/cron-parser";
-import { type CronContext, type CronJob } from "./cron.ts";
+import type { CronContext, CronJob } from "./cron.ts";
 
 /**
  * Upserts a cron job row identified by `name`.
@@ -23,7 +23,7 @@ export async function _register(
 		max_attempt_duration_ms: number;
 		backoff_strategy: string;
 	},
-	forceRecalculate: boolean = false
+	forceRecalculate: boolean = false,
 ): Promise<CronJob> {
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
@@ -32,9 +32,7 @@ export async function _register(
 		timezone: data.timezone ?? undefined,
 	}).getNextRun();
 
-	const conflictNextRun = forceRecalculate
-		? "next_run_at = EXCLUDED.next_run_at,"
-		: "";
+	const conflictNextRun = forceRecalculate ? "next_run_at = EXCLUDED.next_run_at," : "";
 
 	const { rows } = await db.query(
 		`INSERT INTO ${tableCron}
@@ -63,7 +61,7 @@ export async function _register(
 			data.max_attempts,
 			data.max_attempt_duration_ms,
 			data.backoff_strategy,
-		]
+		],
 	);
 
 	return rows[0] as CronJob;

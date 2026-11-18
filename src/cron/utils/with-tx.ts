@@ -27,7 +27,7 @@ export function isPool(db: pg.Pool | pg.Client): db is pg.Pool {
  */
 export async function withTx<T>(
 	db: pg.Pool | pg.Client,
-	fn: (client: pg.PoolClient | pg.Client) => Promise<T>
+	fn: (client: pg.PoolClient | pg.Client) => Promise<T>,
 ): Promise<T> {
 	if (isPool(db)) {
 		const client = await db.connect();

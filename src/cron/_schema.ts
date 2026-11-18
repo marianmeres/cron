@@ -1,4 +1,4 @@
-import { CRON_STATUS, RUN_STATUS, type CronContext } from "./cron.ts";
+import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
 import { withTx } from "./utils/with-tx.ts";
 
 export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
@@ -9,9 +9,7 @@ export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
 	`;
 }
 
-export function _schemaCreate(
-	context: Pick<CronContext, "tableNames">,
-): string {
+export function _schemaCreate(context: Pick<CronContext, "tableNames">): string {
 	const { tableCron, tableCronRunLog } = context.tableNames;
 
 	// so we can work with "schema." prefix in naming things...
@@ -20,11 +18,7 @@ export function _schemaCreate(
 	const okCronStatuses = [CRON_STATUS.IDLE, CRON_STATUS.RUNNING]
 		.map((v) => `'${v}'`)
 		.join(", ");
-	const okRunStatuses = [
-		RUN_STATUS.SUCCESS,
-		RUN_STATUS.ERROR,
-		RUN_STATUS.TIMEOUT,
-	]
+	const okRunStatuses = [RUN_STATUS.SUCCESS, RUN_STATUS.ERROR, RUN_STATUS.TIMEOUT]
 		.map((v) => `'${v}'`)
 		.join(", ");
 
@@ -92,10 +86,7 @@ export function _schemaCreate(
 	`;
 }
 
-export async function _initialize(
-	context: CronContext,
-	hard = false,
-): Promise<void> {
+export async function _initialize(context: CronContext, hard = false): Promise<void> {
 	const sql = [hard && _schemaDrop(context), _schemaCreate(context)]
 		.filter(Boolean)
 		.join("\n");
