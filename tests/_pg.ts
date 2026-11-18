@@ -1,11 +1,12 @@
+import process from "node:process";
 import pg from "pg";
 
 const { PG_HOST, PG_DATABASE, PG_USER, PG_PASSWORD, PG_PORT } = {
-	PG_HOST: Deno.env.get("TEST_PG_HOST") || "localhost",
-	PG_DATABASE: Deno.env.get("TEST_PG_DATABASE"),
-	PG_USER: Deno.env.get("TEST_PG_USER"),
-	PG_PASSWORD: Deno.env.get("TEST_PG_PASSWORD"),
-	PG_PORT: Deno.env.get("TEST_PG_PORT") || "5432",
+	PG_HOST: process.env.TEST_PG_HOST || "localhost",
+	PG_DATABASE: process.env.TEST_PG_DATABASE,
+	PG_USER: process.env.TEST_PG_USER,
+	PG_PASSWORD: process.env.TEST_PG_PASSWORD,
+	PG_PORT: process.env.TEST_PG_PORT || "5432",
 };
 
 export function createPg() {

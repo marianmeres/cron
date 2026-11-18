@@ -14,7 +14,8 @@
  * Requires a live PostgreSQL database (TEST_PG_*) just like cron-db.test.ts.
  */
 
-import { assertEquals, assert } from "@std/assert";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import {
 	Cron,
 	CRON_STATUS,
@@ -87,27 +88,27 @@ async function fetchJob(db: pg.Pool, name: string) {
 // B1: real transactions
 // =========================================================================
 
-Deno.test("B1: withTx commits all writes on the same connection", async () => {
+test("B1: withTx commits all writes on the same connection", async () => {
 	const db = createPg();
 	try {
 		await withTx(db, async (client) => {
 			await client.query(`CREATE TEMP TABLE _tx_probe (v INT) ON COMMIT DROP`);
 			await client.query(`INSERT INTO _tx_probe VALUES (1), (2), (3)`);
 			const { rows } = await client.query(`SELECT COUNT(*)::int AS n FROM _tx_probe`);
-			assertEquals(rows[0].n, 3);
+			assert.deepStrictEqual(rows[0].n, 3);
 		});
 		// After commit, the temp table is gone (ON COMMIT DROP). A different
 		// pool checkout proves the table no longer exists.
 		const { rows } = await db.query(
 			`SELECT to_regclass('_tx_probe') IS NULL AS gone`
 		);
-		assertEquals(rows[0].gone, true);
+		assert.deepStrictEqual(rows[0].gone, true);
 	} finally {
 		await db.end();
 	}
 });
 
-Deno.test("B1: withTx rolls back on error", async () => {
+test("B1: withTx rolls back on error", async () => {
 	const db = createPg();
 	try {
 		// Use a real, persistent table so we can probe across connections
@@ -119,15 +120,15 @@ Deno.test("B1: withTx rolls back on error", async () => {
 				await client.query(`INSERT INTO _tx_rollback_probe VALUES (1)`);
 				throw new Error("boom");
 			});
-			assert(false, "withTx should have rethrown");
+			assert.ok(false, "withTx should have rethrown");
 		} catch (e) {
-			assertEquals((e as Error).message, "boom");
+			assert.deepStrictEqual((e as Error).message, "boom");
 		}
 
 		const { rows } = await db.query(
 			`SELECT COUNT(*)::int AS n FROM _tx_rollback_probe`
 		);
-		assertEquals(rows[0].n, 0, "insert must have been rolled back");
+		assert.deepStrictEqual(rows[0].n, 0, "insert must have been rolled back");
 
 		await db.query(`DROP TABLE _tx_rollback_probe`);
 	} finally {
@@ -139,7 +140,7 @@ Deno.test("B1: withTx rolls back on error", async () => {
 // B5: lease token prevents stale-recovered worker from clobbering
 // =========================================================================
 
-Deno.test(
+test(
 	"B5: stale-recovered worker cannot overwrite fresh claim's result",
 	async () => {
 		const { db, cron } = await setup();
@@ -160,7 +161,7 @@ Deno.test(
 
 			// Stale recovery: clears lease_token, sets next_run_at = NOW()
 			const recovered = await cron.cleanup(5);
-			assertEquals(recovered, 1);
+			assert.deepStrictEqual(recovered, 1);
 
 			// Now the (still-alive) old worker tries to write its result via
 			// _handleCronSuccess. We simulate that by running the same UPDATE
@@ -174,11 +175,11 @@ Deno.test(
 				 WHERE name = 'racy' AND lease_token = $1`,
 				[oldToken]
 			);
-			assertEquals(rowCount, 0, "stale write must be rejected by lease fence");
+			assert.deepStrictEqual(rowCount, 0, "stale write must be rejected by lease fence");
 
 			const row = await fetchJob(db, "racy");
 			// next_run_at must NOT be 99 years in the future
-			assert(
+			assert.ok(
 				new Date(row.next_run_at).getFullYear() < 2050,
 				"next_run_at must reflect cleanup, not the stale write"
 			);
@@ -188,7 +189,7 @@ Deno.test(
 	}
 );
 
-Deno.test("B5: lease token is set on claim, cleared on success", async () => {
+test("B5: lease token is set on claim, cleared on success", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("lease-job", "* * * * *", async () => "ok");
@@ -198,8 +199,8 @@ Deno.test("B5: lease token is set on claim, cleared on success", async () => {
 		await sleep(300);
 
 		const row = await fetchJob(db, "lease-job");
-		assertEquals(row.last_run_status, RUN_STATUS.SUCCESS);
-		assertEquals(row.lease_token, null, "lease_token must be cleared after success");
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.SUCCESS);
+		assert.deepStrictEqual(row.lease_token, null, "lease_token must be cleared after success");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -209,7 +210,7 @@ Deno.test("B5: lease token is set on claim, cleared on success", async () => {
 // B4: onEvent wrap cache — first-unsub-kills-others bug + duplicate wrap
 // =========================================================================
 
-Deno.test(
+test(
 	"B4: subscribing to multiple names then unsubscribing once detaches all",
 	async () => {
 		const { db, cron } = await setup();
@@ -234,7 +235,7 @@ Deno.test(
 			await sleep(400);
 
 			// Each job fires once; cb should be invoked at most once per job
-			assertEquals(calls, 2, `expected 2 events, got ${calls}`);
+			assert.deepStrictEqual(calls, 2, `expected 2 events, got ${calls}`);
 
 			unsub();
 			// After unsub of the first batch, only the explicit "evt-a" subscription
@@ -245,7 +246,7 @@ Deno.test(
 	}
 );
 
-Deno.test("B4: handler exception in onDone does not kill processor", async () => {
+test("B4: handler exception in onDone does not kill processor", async () => {
 	const { db, cron } = await setup();
 	try {
 		let secondFired = false;
@@ -261,7 +262,7 @@ Deno.test("B4: handler exception in onDone does not kill processor", async () =>
 		await cron.start(1);
 		await sleep(300);
 
-		assert(secondFired, "second onDone subscriber must still fire");
+		assert.ok(secondFired, "second onDone subscriber must still fire");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -271,7 +272,7 @@ Deno.test("B4: handler exception in onDone does not kill processor", async () =>
 // B6: drainTimeoutMs returns even if handler ignores abort
 // =========================================================================
 
-Deno.test("B6: stop({ drainTimeoutMs }) returns within the cap", async () => {
+test("B6: stop({ drainTimeoutMs }) returns within the cap", async () => {
 	const { db, cron } = await setup();
 	try {
 		// Handler that sleeps longer than the drain cap and ignores the
@@ -290,7 +291,7 @@ Deno.test("B6: stop({ drainTimeoutMs }) returns within the cap", async () => {
 		const started = Date.now();
 		await cron.stop({ drainTimeoutMs: 100 });
 		const elapsed = Date.now() - started;
-		assert(
+		assert.ok(
 			elapsed < 600,
 			`stop should return within ~drainTimeoutMs, took ${elapsed}ms`
 		);
@@ -308,7 +309,7 @@ Deno.test("B6: stop({ drainTimeoutMs }) returns within the cap", async () => {
 // D1: AbortSignal forwarded to handler
 // =========================================================================
 
-Deno.test("D1: handler receives AbortSignal that fires on shutdown", async () => {
+test("D1: handler receives AbortSignal that fires on shutdown", async () => {
 	const { db, cron } = await setup();
 	try {
 		let aborted = false;
@@ -323,13 +324,13 @@ Deno.test("D1: handler receives AbortSignal that fires on shutdown", async () =>
 		await sleep(150);
 		await cron.stop({ drainTimeoutMs: 500 });
 
-		assert(aborted, "handler's AbortSignal must fire during shutdown");
+		assert.ok(aborted, "handler's AbortSignal must fire during shutdown");
 	} finally {
 		await db.end();
 	}
 });
 
-Deno.test("D1: withTimeout aborts the controller on timeout", async () => {
+test("D1: withTimeout aborts the controller on timeout", async () => {
 	const ctrl = new AbortController();
 	let aborted = false;
 	ctrl.signal.addEventListener("abort", () => {
@@ -349,15 +350,15 @@ Deno.test("D1: withTimeout aborts the controller on timeout", async () => {
 	} catch (e) {
 		caught = e;
 	}
-	assert(caught instanceof TimeoutError);
-	assert(aborted, "AbortController must be aborted when withTimeout fires");
+	assert.ok(caught instanceof TimeoutError);
+	assert.ok(aborted, "AbortController must be aborted when withTimeout fires");
 });
 
 // =========================================================================
 // D2: autoCleanup option
 // =========================================================================
 
-Deno.test("D2: autoCleanup recovers stuck jobs on a timer", async () => {
+test("D2: autoCleanup recovers stuck jobs on a timer", async () => {
 	const db = createPg();
 	const cron = createCron(db, {
 		autoCleanup: { intervalMs: 100, maxAllowedRunDurationMinutes: 0.001 }, // 60ms threshold
@@ -378,7 +379,7 @@ Deno.test("D2: autoCleanup recovers stuck jobs on a timer", async () => {
 		await sleep(350); // > intervalMs
 
 		const row = await fetchJob(db, "autoclean");
-		assertEquals(row.status, CRON_STATUS.IDLE, "autoCleanup must recover the job");
+		assert.deepStrictEqual(row.status, CRON_STATUS.IDLE, "autoCleanup must recover the job");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -388,24 +389,24 @@ Deno.test("D2: autoCleanup recovers stuck jobs on a timer", async () => {
 // D4: exponential backoff is clamped
 // =========================================================================
 
-Deno.test("D4: exponential backoff is clamped to maxMs", () => {
+test("D4: exponential backoff is clamped to maxMs", () => {
 	// attempt 1 → 2s, attempt 2 → 4s, attempt 10 → 1024s (=> clamped to maxMs)
-	assertEquals(_backoffMs("exp", 1), 2_000);
-	assertEquals(_backoffMs("exp", 2), 4_000);
-	assertEquals(_backoffMs("exp", 20), DEFAULT_MAX_BACKOFF_MS);
-	assertEquals(_backoffMs("exp", 30), DEFAULT_MAX_BACKOFF_MS);
+	assert.deepStrictEqual(_backoffMs("exp", 1), 2_000);
+	assert.deepStrictEqual(_backoffMs("exp", 2), 4_000);
+	assert.deepStrictEqual(_backoffMs("exp", 20), DEFAULT_MAX_BACKOFF_MS);
+	assert.deepStrictEqual(_backoffMs("exp", 30), DEFAULT_MAX_BACKOFF_MS);
 });
 
-Deno.test("D4: 'none' strategy returns 0", () => {
-	assertEquals(_backoffMs("none", 1), 0);
-	assertEquals(_backoffMs("none", 100), 0);
+test("D4: 'none' strategy returns 0", () => {
+	assert.deepStrictEqual(_backoffMs("none", 1), 0);
+	assert.deepStrictEqual(_backoffMs("none", 100), 0);
 });
 
 // =========================================================================
 // pruneRunLog
 // =========================================================================
 
-Deno.test("pruneRunLog: deletes only old rows, returns count", async () => {
+test("pruneRunLog: deletes only old rows, returns count", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("prune", "* * * * *", async () => "ok");
@@ -422,10 +423,10 @@ Deno.test("pruneRunLog: deletes only old rows, returns count", async () => {
 		);
 
 		const deleted = await cron.pruneRunLog(60); // older than 60min
-		assert(deleted >= 1, `expected at least 1 row deleted, got ${deleted}`);
+		assert.ok(deleted >= 1, `expected at least 1 row deleted, got ${deleted}`);
 
 		const history = await cron.getRunHistory("prune");
-		assertEquals(history.length, 0);
+		assert.deepStrictEqual(history.length, 0);
 	} finally {
 		await db.end();
 	}
@@ -435,7 +436,7 @@ Deno.test("pruneRunLog: deletes only old rows, returns count", async () => {
 // sync-registry: removes orphan handlers
 // =========================================================================
 
-Deno.test(
+test(
 	"sync-registry: removeHandler called for in-memory handlers no longer in registry",
 	async () => {
 		const db = createPg();
@@ -451,17 +452,17 @@ Deno.test(
 		try {
 			// Pre-existing in-memory handler that won't be in the registry
 			cron.setHandler("ghost", async () => "ghost");
-			assert(cron.hasHandler("ghost"));
+			assert.ok(cron.hasHandler("ghost"));
 
 			const registry = createTaskRegistry();
 			registry.define("real", { handler: async () => "real" });
 
 			const { synced, removedHandlers } = await syncRegistryToCron(cron, registry);
 
-			assert(synced.includes("real"));
-			assert(removedHandlers.includes("ghost"));
-			assert(!cron.hasHandler("ghost"), "ghost handler must be removed");
-			assert(cron.hasHandler("real"));
+			assert.ok(synced.includes("real"));
+			assert.ok(removedHandlers.includes("ghost"));
+			assert.ok(!cron.hasHandler("ghost"), "ghost handler must be removed");
+			assert.ok(cron.hasHandler("real"));
 		} finally {
 			await cron.stop();
 			await db.end();

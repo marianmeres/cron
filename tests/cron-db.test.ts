@@ -4,10 +4,11 @@
  * Requires a live PostgreSQL database. Configure via environment variables:
  *   TEST_PG_HOST, TEST_PG_DATABASE, TEST_PG_USER, TEST_PG_PASSWORD, TEST_PG_PORT
  *
- * Run: deno test -A --env-file tests/cron-db.test.ts
+ * Run: node --test --env-file-if-exists=.env tests/cron-db.test.ts
  */
 
-import { assertEquals, assert, assertRejects } from "@std/assert";
+import assert from "node:assert/strict";
+import { test } from "node:test";
 import {
 	Cron,
 	CRON_STATUS,
@@ -82,7 +83,7 @@ async function teardown(cron: Cron, db: pg.Pool) {
 // Tests
 // =========================================================================
 
-Deno.test("1 schema-init-idempotent", async () => {
+test("1 schema-init-idempotent", async () => {
 	const { db, cron } = await setup();
 	try {
 		// Calling resetHard() twice should not throw
@@ -94,17 +95,17 @@ Deno.test("1 schema-init-idempotent", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("2 register-creates-row", async () => {
+test("2 register-creates-row", async () => {
 	const { db, cron } = await setup();
 	try {
 		const job = await cron.register("greet", "* * * * *", async () => "hi");
 
-		assertEquals(job.name, "greet");
-		assertEquals(job.expression, "* * * * *");
-		assertEquals(job.status, CRON_STATUS.IDLE);
-		assertEquals(job.enabled, true);
-		assertEquals(job.last_run_status, null);
-		assert(job.next_run_at > new Date(), "next_run_at must be in the future");
+		assert.deepStrictEqual(job.name, "greet");
+		assert.deepStrictEqual(job.expression, "* * * * *");
+		assert.deepStrictEqual(job.status, CRON_STATUS.IDLE);
+		assert.deepStrictEqual(job.enabled, true);
+		assert.deepStrictEqual(job.last_run_status, null);
+		assert.ok(job.next_run_at > new Date(), "next_run_at must be in the future");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -112,7 +113,7 @@ Deno.test("2 register-creates-row", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("3 register-upsert-keeps-next-run-at", async () => {
+test("3 register-upsert-keeps-next-run-at", async () => {
 	const { db, cron } = await setup();
 	try {
 		const original = await cron.register("greet", "* * * * *", async () => "v1");
@@ -121,9 +122,9 @@ Deno.test("3 register-upsert-keeps-next-run-at", async () => {
 		// Re-register with a different expression
 		const updated = await cron.register("greet", "0 * * * *", async () => "v2");
 
-		assertEquals(updated.expression, "0 * * * *");
+		assert.deepStrictEqual(updated.expression, "0 * * * *");
 		// next_run_at must NOT have been reset
-		assertEquals(
+		assert.deepStrictEqual(
 			updated.next_run_at.toISOString(),
 			originalNextRun.toISOString(),
 			"next_run_at should not change on upsert"
@@ -135,10 +136,10 @@ Deno.test("3 register-upsert-keeps-next-run-at", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("4 register-invalid-expression-throws", async () => {
+test("4 register-invalid-expression-throws", async () => {
 	const { db, cron } = await setup();
 	try {
-		await assertRejects(
+		await assert.rejects(
 			() => cron.register("bad", "not a valid expression", async () => {}),
 			Error
 		);
@@ -149,7 +150,7 @@ Deno.test("4 register-invalid-expression-throws", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("5 happy-flow", async () => {
+test("5 happy-flow", async () => {
 	const { db, cron } = await setup();
 	try {
 		let called = false;
@@ -163,9 +164,9 @@ Deno.test("5 happy-flow", async () => {
 		await sleep(300);
 
 		const row = await fetchJob(db, "job");
-		assert(called, "handler must have been called");
-		assertEquals(row.last_run_status, RUN_STATUS.SUCCESS);
-		assert(row.next_run_at > new Date(), "next_run_at must be in the future");
+		assert.ok(called, "handler must have been called");
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.SUCCESS);
+		assert.ok(row.next_run_at > new Date(), "next_run_at must be in the future");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -173,7 +174,7 @@ Deno.test("5 happy-flow", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("6 missed-ticks-are-skipped-not-replayed", async () => {
+test("6 missed-ticks-are-skipped-not-replayed", async () => {
 	// A job whose slot is long past (process was down, job was disabled, …) runs
 	// ONCE and then resumes at the next future slot. It must not replay every
 	// tick it missed back-to-back.
@@ -204,14 +205,14 @@ Deno.test("6 missed-ticks-are-skipped-not-replayed", async () => {
 		await cron.stop();
 
 		const after = await fetchJob(db, "precise");
-		assertEquals(after.last_run_status, RUN_STATUS.SUCCESS);
-		assertEquals(runs, 1, `missed ticks were replayed: ${runs} runs`);
-		assert(
+		assert.deepStrictEqual(after.last_run_status, RUN_STATUS.SUCCESS);
+		assert.deepStrictEqual(runs, 1, `missed ticks were replayed: ${runs} runs`);
+		assert.ok(
 			new Date(after.next_run_at) > new Date(),
 			"next_run_at must be the next FUTURE slot, not a missed one"
 		);
 		// …and that slot is minute-aligned, i.e. still on the cron grid
-		assertEquals(new Date(after.next_run_at).getSeconds(), 0);
+		assert.deepStrictEqual(new Date(after.next_run_at).getSeconds(), 0);
 	} finally {
 		await db.end();
 	}
@@ -219,7 +220,7 @@ Deno.test("6 missed-ticks-are-skipped-not-replayed", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
+test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
 	const { db, cron } = await setup();
 	try {
 		let attempts = 0;
@@ -238,13 +239,13 @@ Deno.test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
 		await cron.start(1);
 		await sleep(500);
 
-		assertEquals(attempts, 3);
+		assert.deepStrictEqual(attempts, 3);
 		const row = await fetchJob(db, "retry-job");
-		assertEquals(row.last_run_status, RUN_STATUS.SUCCESS);
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.SUCCESS);
 
 		// Run log should have 3 entries
 		const history = await cron.getRunHistory("retry-job");
-		assertEquals(history.length, 3);
+		assert.deepStrictEqual(history.length, 3);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -252,7 +253,7 @@ Deno.test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("8 max-attempts-exceeded-advances-schedule", async () => {
+test("8 max-attempts-exceeded-advances-schedule", async () => {
 	const { db, cron } = await setup();
 	try {
 		let attempts = 0;
@@ -270,14 +271,14 @@ Deno.test("8 max-attempts-exceeded-advances-schedule", async () => {
 		await cron.start(1);
 		await sleep(400);
 
-		assertEquals(attempts, 2);
+		assert.deepStrictEqual(attempts, 2);
 		const row = await fetchJob(db, "always-fail");
-		assertEquals(row.last_run_status, RUN_STATUS.ERROR);
-		assertEquals(row.status, CRON_STATUS.IDLE, "job must return to idle");
-		assert(row.next_run_at > new Date(), "next_run_at must still advance");
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.ERROR);
+		assert.deepStrictEqual(row.status, CRON_STATUS.IDLE, "job must return to idle");
+		assert.ok(row.next_run_at > new Date(), "next_run_at must still advance");
 
 		const history = await cron.getRunHistory("always-fail");
-		assertEquals(history.length, 2);
+		assert.deepStrictEqual(history.length, 2);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -285,7 +286,7 @@ Deno.test("8 max-attempts-exceeded-advances-schedule", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("9 timeout-enforcement", async () => {
+test("9 timeout-enforcement", async () => {
 	// The handler sleeps 500ms but is killed by TimeoutError at 50ms.
 	// The handler's sleep(500) timer is abandoned — it fires at ~500ms.
 	// We wait 700ms total so the timer fires during this test (not after),
@@ -308,8 +309,8 @@ Deno.test("9 timeout-enforcement", async () => {
 		await cron.stop();
 
 		const row = await fetchJob(db, "slow-job");
-		assertEquals(row.last_run_status, RUN_STATUS.TIMEOUT);
-		assertEquals(row.status, CRON_STATUS.IDLE);
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.TIMEOUT);
+		assert.deepStrictEqual(row.status, CRON_STATUS.IDLE);
 	} finally {
 		await db.end();
 	}
@@ -317,7 +318,7 @@ Deno.test("9 timeout-enforcement", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("10 disabled-jobs-not-polled", async () => {
+test("10 disabled-jobs-not-polled", async () => {
 	const { db, cron } = await setup();
 	try {
 		let called = false;
@@ -330,9 +331,9 @@ Deno.test("10 disabled-jobs-not-polled", async () => {
 		await cron.start(1);
 		await sleep(200);
 
-		assert(!called, "handler must NOT be called for disabled job");
+		assert.ok(!called, "handler must NOT be called for disabled job");
 		const row = await fetchJob(db, "quiet");
-		assertEquals(row.enabled, false);
+		assert.deepStrictEqual(row.enabled, false);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -340,16 +341,16 @@ Deno.test("10 disabled-jobs-not-polled", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("11 enable-disable-toggle", async () => {
+test("11 enable-disable-toggle", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("toggle", "* * * * *", async () => {});
 
 		const disabled = await cron.disable("toggle");
-		assertEquals(disabled.enabled, false);
+		assert.deepStrictEqual(disabled.enabled, false);
 
 		const enabled = await cron.enable("toggle");
-		assertEquals(enabled.enabled, true);
+		assert.deepStrictEqual(enabled.enabled, true);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -357,7 +358,7 @@ Deno.test("11 enable-disable-toggle", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("12 concurrent-no-double-execution", async () => {
+test("12 concurrent-no-double-execution", async () => {
 	const db = createPg();
 	const cron1 = createCron(db);
 	await cron1.resetHard();
@@ -381,7 +382,7 @@ Deno.test("12 concurrent-no-double-execution", async () => {
 		await cron2.start(1);
 		await sleep(400);
 
-		assertEquals(callCount, 1, "job must execute exactly once");
+		assert.deepStrictEqual(callCount, 1, "job must execute exactly once");
 	} finally {
 		cron1.unsubscribeAll();
 		await cron1.stop();
@@ -392,7 +393,7 @@ Deno.test("12 concurrent-no-double-execution", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("13 onDone-fires-on-success", async () => {
+test("13 onDone-fires-on-success", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("notify", "* * * * *", async () => ({ result: 42 }));
@@ -406,9 +407,9 @@ Deno.test("13 onDone-fires-on-success", async () => {
 		await cron.start(1);
 		await sleep(300);
 
-		assert(doneJob !== null, "onDone callback must fire");
-		assertEquals((doneJob as CronJob).last_run_status, RUN_STATUS.SUCCESS);
-		assertEquals((doneJob as CronJob).name, "notify");
+		assert.ok(doneJob !== null, "onDone callback must fire");
+		assert.deepStrictEqual((doneJob as CronJob).last_run_status, RUN_STATUS.SUCCESS);
+		assert.deepStrictEqual((doneJob as CronJob).name, "notify");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -416,7 +417,7 @@ Deno.test("13 onDone-fires-on-success", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("14 onError-fires-on-failure", async () => {
+test("14 onError-fires-on-failure", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("broken", "* * * * *", async () => {
@@ -432,8 +433,8 @@ Deno.test("14 onError-fires-on-failure", async () => {
 		await cron.start(1);
 		await sleep(300);
 
-		assert(errorJob !== null, "onError callback must fire");
-		assertEquals((errorJob as CronJob).last_run_status, RUN_STATUS.ERROR);
+		assert.ok(errorJob !== null, "onError callback must fire");
+		assert.deepStrictEqual((errorJob as CronJob).last_run_status, RUN_STATUS.ERROR);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -441,7 +442,7 @@ Deno.test("14 onError-fires-on-failure", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("15 getRunHistory-returns-logs", async () => {
+test("15 getRunHistory-returns-logs", async () => {
 	const { db, cron } = await setup();
 	try {
 		let runs = 0;
@@ -457,9 +458,9 @@ Deno.test("15 getRunHistory-returns-logs", async () => {
 		await sleep(200);
 
 		const history = await cron.getRunHistory("history");
-		assert(history.length >= 2, "must have at least 2 run log entries");
+		assert.ok(history.length >= 2, "must have at least 2 run log entries");
 		// Newest first
-		assert(
+		assert.ok(
 			new Date(history[0].started_at) >= new Date(history[1].started_at),
 			"run log must be ordered newest first"
 		);
@@ -470,7 +471,7 @@ Deno.test("15 getRunHistory-returns-logs", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("16 cleanup-reclaims-stale-running-jobs", async () => {
+test("16 cleanup-reclaims-stale-running-jobs", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("stuck", "* * * * *", async () => {});
@@ -484,12 +485,12 @@ Deno.test("16 cleanup-reclaims-stale-running-jobs", async () => {
 		);
 
 		const before = await fetchJob(db, "stuck");
-		assertEquals(before.status, "running");
+		assert.deepStrictEqual(before.status, "running");
 
 		await cron.cleanup(5); // 5-minute threshold
 
 		const after = await fetchJob(db, "stuck");
-		assertEquals(after.status, CRON_STATUS.IDLE, "stale job must be reset to idle");
+		assert.deepStrictEqual(after.status, CRON_STATUS.IDLE, "stale job must be reset to idle");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -497,19 +498,19 @@ Deno.test("16 cleanup-reclaims-stale-running-jobs", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("17 unregister-removes-job", async () => {
+test("17 unregister-removes-job", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("temp", "* * * * *", async () => {});
 
 		const before = await cron.find("temp");
-		assert(before !== null, "job must exist before unregister");
+		assert.ok(before !== null, "job must exist before unregister");
 
 		await cron.unregister("temp");
 
 		const after = await cron.find("temp");
-		assertEquals(after, null, "job must be gone after unregister");
-		assert(!cron.hasHandler("temp"), "in-memory handler must also be removed");
+		assert.deepStrictEqual(after, null, "job must be gone after unregister");
+		assert.ok(!cron.hasHandler("temp"), "in-memory handler must also be removed");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -517,7 +518,7 @@ Deno.test("17 unregister-removes-job", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("18 healthPreview-returns-stats", async () => {
+test("18 healthPreview-returns-stats", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("stats", "* * * * *", async () => "ok");
@@ -526,11 +527,11 @@ Deno.test("18 healthPreview-returns-stats", async () => {
 		await sleep(300);
 
 		const preview = await cron.healthPreview(60);
-		assert(Array.isArray(preview), "healthPreview must return an array");
+		assert.ok(Array.isArray(preview), "healthPreview must return an array");
 
 		const successRow = preview.find((r) => r.status === RUN_STATUS.SUCCESS);
-		assert(successRow !== undefined, "must have a success stats row");
-		assert(parseInt(`${successRow!.count}`) >= 1, "count must be at least 1");
+		assert.ok(successRow !== undefined, "must have a success stats row");
+		assert.ok(parseInt(`${successRow!.count}`) >= 1, "count must be at least 1");
 	} finally {
 		await teardown(cron, db);
 	}
@@ -538,18 +539,18 @@ Deno.test("18 healthPreview-returns-stats", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("19 resetHard-clears-all-jobs", async () => {
+test("19 resetHard-clears-all-jobs", async () => {
 	const { db, cron } = await setup();
 	try {
 		await cron.register("to-be-cleared", "* * * * *", async () => {});
 
 		const before = await cron.fetchAll();
-		assertEquals(before.length, 1);
+		assert.deepStrictEqual(before.length, 1);
 
 		await cron.resetHard();
 
 		const after = await cron.fetchAll();
-		assertEquals(after.length, 0);
+		assert.deepStrictEqual(after.length, 0);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -557,7 +558,7 @@ Deno.test("19 resetHard-clears-all-jobs", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("20 graceful-shutdown-waits-for-active-jobs", async () => {
+test("20 graceful-shutdown-waits-for-active-jobs", async () => {
 	const { db, cron } = await setup();
 	try {
 		let completed = false;
@@ -576,7 +577,7 @@ Deno.test("20 graceful-shutdown-waits-for-active-jobs", async () => {
 		// Stop before the handler finishes — stop() must wait
 		await cron.stop();
 
-		assert(completed, "job must complete before stop() returns");
+		assert.ok(completed, "job must complete before stop() returns");
 	} finally {
 		await db.end();
 	}
@@ -597,11 +598,11 @@ function createCronWithTenant(db: pg.Pool, tenantId: string) {
 	});
 }
 
-Deno.test("21 tenant_id-defaults-to-_default", async () => {
+test("21 tenant_id-defaults-to-_default", async () => {
 	const { db, cron } = await setup();
 	try {
 		const job = await cron.register("greet", "* * * * *", async () => "hi");
-		assertEquals(job.tenant_id, DEFAULT_TENANT_ID);
+		assert.deepStrictEqual(job.tenant_id, DEFAULT_TENANT_ID);
 	} finally {
 		await teardown(cron, db);
 	}
@@ -609,7 +610,7 @@ Deno.test("21 tenant_id-defaults-to-_default", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("22 tenant_id-same-name-different-tenants", async () => {
+test("22 tenant_id-same-name-different-tenants", async () => {
 	const db = createPg();
 	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
@@ -628,17 +629,17 @@ Deno.test("22 tenant_id-same-name-different-tenants", async () => {
 			async () => "b"
 		);
 
-		assertEquals(jobA.tenant_id, "tenant-a");
-		assertEquals(jobB.tenant_id, "tenant-b");
-		assertEquals(jobA.name, jobB.name);
+		assert.deepStrictEqual(jobA.tenant_id, "tenant-a");
+		assert.deepStrictEqual(jobB.tenant_id, "tenant-b");
+		assert.deepStrictEqual(jobA.name, jobB.name);
 
 		// Each instance sees only its own job
 		const allA = await cronA.fetchAll();
 		const allB = await cronB.fetchAll();
-		assertEquals(allA.length, 1);
-		assertEquals(allB.length, 1);
-		assertEquals(allA[0].tenant_id, "tenant-a");
-		assertEquals(allB[0].tenant_id, "tenant-b");
+		assert.deepStrictEqual(allA.length, 1);
+		assert.deepStrictEqual(allB.length, 1);
+		assert.deepStrictEqual(allA[0].tenant_id, "tenant-a");
+		assert.deepStrictEqual(allB[0].tenant_id, "tenant-b");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -648,7 +649,7 @@ Deno.test("22 tenant_id-same-name-different-tenants", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("23 tenant_id-find-is-scoped", async () => {
+test("23 tenant_id-find-is-scoped", async () => {
 	const db = createPg();
 	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
@@ -662,10 +663,10 @@ Deno.test("23 tenant_id-find-is-scoped", async () => {
 		const foundA = await cronA.find("shared-name");
 		const foundB = await cronB.find("shared-name");
 
-		assert(foundA !== null);
-		assert(foundB !== null);
-		assertEquals(foundA!.tenant_id, "tenant-a");
-		assertEquals(foundB!.tenant_id, "tenant-b");
+		assert.ok(foundA !== null);
+		assert.ok(foundB !== null);
+		assert.deepStrictEqual(foundA!.tenant_id, "tenant-a");
+		assert.deepStrictEqual(foundB!.tenant_id, "tenant-b");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -675,7 +676,7 @@ Deno.test("23 tenant_id-find-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("24 tenant_id-unregister-is-scoped", async () => {
+test("24 tenant_id-unregister-is-scoped", async () => {
 	const db = createPg();
 	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
@@ -691,8 +692,8 @@ Deno.test("24 tenant_id-unregister-is-scoped", async () => {
 		// A's job is gone, B's still exists
 		const foundA = await cronA.find("job");
 		const foundB = await cronB.find("job");
-		assertEquals(foundA, null);
-		assert(foundB !== null);
+		assert.deepStrictEqual(foundA, null);
+		assert.ok(foundB !== null);
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -702,7 +703,7 @@ Deno.test("24 tenant_id-unregister-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("25 tenant_id-enable-disable-is-scoped", async () => {
+test("25 tenant_id-enable-disable-is-scoped", async () => {
 	const db = createPg();
 	const cronA = createCronWithTenant(db, "tenant-a");
 	await cronA.resetHard();
@@ -717,8 +718,8 @@ Deno.test("25 tenant_id-enable-disable-is-scoped", async () => {
 
 		const jobA = await cronA.find("job");
 		const jobB = await cronB.find("job");
-		assertEquals(jobA!.enabled, false);
-		assertEquals(jobB!.enabled, true, "tenant-b's job must remain enabled");
+		assert.deepStrictEqual(jobA!.enabled, false);
+		assert.deepStrictEqual(jobB!.enabled, true, "tenant-b's job must remain enabled");
 	} finally {
 		await cronA.stop();
 		await cronB.stop();
@@ -728,7 +729,7 @@ Deno.test("25 tenant_id-enable-disable-is-scoped", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("26 single-start-serves-multiple-tenants", async () => {
+test("26 single-start-serves-multiple-tenants", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -757,8 +758,8 @@ Deno.test("26 single-start-serves-multiple-tenants", async () => {
 		await cron.start(1);
 		await sleep(400);
 
-		assert(calledA, "tenant-a handler must have been called");
-		assert(calledB, "tenant-b handler must have been called");
+		assert.ok(calledA, "tenant-a handler must have been called");
+		assert.ok(calledB, "tenant-b handler must have been called");
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
@@ -768,7 +769,7 @@ Deno.test("26 single-start-serves-multiple-tenants", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("27 forTenant-management-is-isolated", async () => {
+test("27 forTenant-management-is-isolated", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -784,22 +785,22 @@ Deno.test("27 forTenant-management-is-isolated", async () => {
 		// fetchAll is scoped
 		const allA = await projA.fetchAll();
 		const allB = await projB.fetchAll();
-		assertEquals(allA.length, 1);
-		assertEquals(allB.length, 2);
-		assertEquals(allA[0].tenant_id, "tenant-a");
+		assert.deepStrictEqual(allA.length, 1);
+		assert.deepStrictEqual(allB.length, 2);
+		assert.deepStrictEqual(allA[0].tenant_id, "tenant-a");
 
 		// find is scoped
 		const foundA = await projA.find("report");
 		const foundB = await projB.find("report");
-		assert(foundA !== null);
-		assert(foundB !== null);
-		assertEquals(foundA!.expression, "* * * * *");
-		assertEquals(foundB!.expression, "0 * * * *");
+		assert.ok(foundA !== null);
+		assert.ok(foundB !== null);
+		assert.deepStrictEqual(foundA!.expression, "* * * * *");
+		assert.deepStrictEqual(foundB!.expression, "0 * * * *");
 
 		// unregister is scoped
 		await projA.unregister("report");
-		assertEquals(await projA.find("report"), null);
-		assert((await projB.find("report")) !== null);
+		assert.deepStrictEqual(await projA.find("report"), null);
+		assert.ok((await projB.find("report")) !== null);
 	} finally {
 		await cron.stop();
 		await db.end();
@@ -808,7 +809,7 @@ Deno.test("27 forTenant-management-is-isolated", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("28 forTenant-event-isolation", async () => {
+test("28 forTenant-event-isolation", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -835,9 +836,9 @@ Deno.test("28 forTenant-event-isolation", async () => {
 		await cron.start(1);
 		await sleep(300);
 
-		assert(doneA !== null, "projA onDone must fire");
-		assertEquals((doneA as CronJob).tenant_id, "tenant-a");
-		assertEquals(doneB, null, "projB onDone must NOT fire (its job was not due)");
+		assert.ok(doneA !== null, "projA onDone must fire");
+		assert.deepStrictEqual((doneA as CronJob).tenant_id, "tenant-a");
+		assert.deepStrictEqual(doneB, null, "projB onDone must NOT fire (its job was not due)");
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
@@ -847,7 +848,7 @@ Deno.test("28 forTenant-event-isolation", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("29 global-cleanup-recovers-all-tenants", async () => {
+test("29 global-cleanup-recovers-all-tenants", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -872,8 +873,8 @@ Deno.test("29 global-cleanup-recovers-all-tenants", async () => {
 
 		const jobA = await projA.find("stuck");
 		const jobB = await projB.find("stuck");
-		assertEquals(jobA!.status, CRON_STATUS.IDLE);
-		assertEquals(jobB!.status, CRON_STATUS.IDLE);
+		assert.deepStrictEqual(jobA!.status, CRON_STATUS.IDLE);
+		assert.deepStrictEqual(jobB!.status, CRON_STATUS.IDLE);
 	} finally {
 		await cron.stop();
 		await db.end();
@@ -882,7 +883,7 @@ Deno.test("29 global-cleanup-recovers-all-tenants", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
+test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -907,8 +908,8 @@ Deno.test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 
 		const jobA = await projA.find("stuck");
 		const jobB = await projB.find("stuck");
-		assertEquals(jobA!.status, CRON_STATUS.IDLE, "tenant-a must be recovered");
-		assertEquals(jobB!.status, "running", "tenant-b must still be stuck");
+		assert.deepStrictEqual(jobA!.status, CRON_STATUS.IDLE, "tenant-a must be recovered");
+		assert.deepStrictEqual(jobB!.status, "running", "tenant-b must still be stuck");
 	} finally {
 		await cron.stop();
 		await db.end();
@@ -917,7 +918,7 @@ Deno.test("30 scoped-cleanup-recovers-only-own-tenant", async () => {
 
 // -------------------------------------------------------------------------
 
-Deno.test("31 forTenant-correct-handler-per-tenant", async () => {
+test("31 forTenant-correct-handler-per-tenant", async () => {
 	const db = createPg();
 	const cron = createCron(db);
 	await cron.resetHard();
@@ -945,8 +946,8 @@ Deno.test("31 forTenant-correct-handler-per-tenant", async () => {
 		await cron.start(1);
 		await sleep(300);
 
-		assertEquals(resultA, "handler-a", "tenant-a's handler must run");
-		assertEquals(resultB, "", "tenant-b's handler must NOT run (not due)");
+		assert.deepStrictEqual(resultA, "handler-a", "tenant-a's handler must run");
+		assert.deepStrictEqual(resultB, "", "tenant-b's handler must NOT run (not due)");
 	} finally {
 		cron.unsubscribeAll();
 		await cron.stop();
@@ -959,7 +960,7 @@ Deno.test("31 forTenant-correct-handler-per-tenant", async () => {
 // Legacy migration: pre-2.x schemas used a `project_id` column. `Cron.migrate()`
 // must rename it (and its indexes) to `tenant_id` in place, preserving data,
 // and be idempotent.
-Deno.test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
+test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 	const db = createPg();
 	const cron = `${TABLE_PREFIX}__cron`;
 	const runLog = `${TABLE_PREFIX}__cron_run_log`;
@@ -1035,29 +1036,29 @@ Deno.test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 
 		// Column renamed, data preserved
 		const cronCols = await cols(cron);
-		assert(cronCols.includes("tenant_id"), "__cron must have tenant_id");
-		assert(!cronCols.includes("project_id"), "__cron must not have project_id");
+		assert.ok(cronCols.includes("tenant_id"), "__cron must have tenant_id");
+		assert.ok(!cronCols.includes("project_id"), "__cron must not have project_id");
 		const runCols = await cols(runLog);
-		assert(runCols.includes("tenant_id"), "run log must have tenant_id");
-		assert(!runCols.includes("project_id"), "run log must not have project_id");
+		assert.ok(runCols.includes("tenant_id"), "run log must have tenant_id");
+		assert.ok(!runCols.includes("project_id"), "run log must not have project_id");
 
 		const { rows } = await db.query(
 			`SELECT tenant_id FROM ${cron} WHERE name = 'job'`
 		);
-		assertEquals(rows[0]?.tenant_id, "acme", "data must be preserved across rename");
+		assert.deepStrictEqual(rows[0]?.tenant_id, "acme", "data must be preserved across rename");
 
 		// Indexes renamed
 		const cronIdx = await idxs(cron);
-		assert(cronIdx.includes(`idx_${sc}_tenant_name`), "unique index renamed to tenant_name");
-		assert(!cronIdx.includes(`idx_${sc}_project_name`), "old project_name index gone");
+		assert.ok(cronIdx.includes(`idx_${sc}_tenant_name`), "unique index renamed to tenant_name");
+		assert.ok(!cronIdx.includes(`idx_${sc}_project_name`), "old project_name index gone");
 		const runIdx = await idxs(runLog);
-		assert(runIdx.includes(`idx_${sr}_tenant_id`), "run log index renamed to tenant_id");
-		assert(!runIdx.includes(`idx_${sr}_project_id`), "old project_id index gone");
+		assert.ok(runIdx.includes(`idx_${sr}_tenant_id`), "run log index renamed to tenant_id");
+		assert.ok(!runIdx.includes(`idx_${sr}_project_id`), "old project_id index gone");
 
 		// Idempotent — a second migrate() must not throw or regress
 		await Cron.migrate(db, TABLE_PREFIX);
 		const cronCols2 = await cols(cron);
-		assert(cronCols2.includes("tenant_id") && !cronCols2.includes("project_id"));
+		assert.ok(cronCols2.includes("tenant_id") && !cronCols2.includes("project_id"));
 	} finally {
 		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
 		await db.end();
@@ -1070,7 +1071,7 @@ Deno.test("32 migrate-renames-legacy-project_id-to-tenant_id", async () => {
 // Postgres folds unquoted identifiers to lower case, so the `information_schema`
 // guard in migrate() must compare against lower-cased names — otherwise the
 // rename silently no-ops and strands data in the old `project_id` column.
-Deno.test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
+test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 	const db = createPg();
 	const PREFIX = "MixCase_"; // mixed-case NAME prefix (no schema needed)
 	const cron = `${PREFIX}__cron`;
@@ -1122,13 +1123,13 @@ Deno.test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 		await Cron.migrate(db, PREFIX);
 
 		const cronCols = await cols(cron);
-		assert(cronCols.includes("tenant_id"), "tenant_id must exist after migrate");
-		assert(
+		assert.ok(cronCols.includes("tenant_id"), "tenant_id must exist after migrate");
+		assert.ok(
 			!cronCols.includes("project_id"),
 			"legacy project_id must be renamed (not left stranded) for a mixed-case prefix"
 		);
 		const { rows } = await db.query(`SELECT tenant_id FROM ${cron} WHERE name = 'job'`);
-		assertEquals(rows[0]?.tenant_id, "acme", "data preserved across the case-sensitive rename");
+		assert.deepStrictEqual(rows[0]?.tenant_id, "acme", "data preserved across the case-sensitive rename");
 	} finally {
 		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
 		await db.end();
