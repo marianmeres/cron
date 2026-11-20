@@ -47,7 +47,7 @@ export async function _markStale(
 				maxAllowedRunDurationMinutes,
 			],
 		);
-		return result.rowCount ?? 0;
+		return result.rowCount;
 	}
 
 	const result = await db.query(
@@ -66,5 +66,5 @@ export async function _markStale(
 			maxAllowedRunDurationMinutes,
 		],
 	);
-	return result.rowCount ?? 0;
+	return result.rowCount;
 }

@@ -3,7 +3,7 @@
 ## Quick Reference
 
 - **Stack**: TypeScript (erasable-only), Node LTS (`.node-version`), pnpm, `node:test`, Biome;
-  PostgreSQL (pg v8)
+  PostgreSQL through `@marianmeres/sqlkit` (`pg` v8 is a dev dependency: the tests build pools)
 - **Install**: `pnpm install` | **Test**: `pnpm test` (one file: `node --test --env-file-if-exists=.env tests/cron-db.test.ts`)
   | **Check all**: `pnpm run ci` (typecheck + lint + test)
 - **Build npm**: `pnpm run build` (`tsc` → `dist/`) | **Release + publish**: `pnpm run rp` / `rpm`
@@ -24,14 +24,14 @@ src/
   sync-registry.ts        — bridge: wires registry handlers to Cron, paginates DB scan, removes orphan handlers
   cron/
     cron.ts               — Cron class + all types/constants
-    _schema.ts            — CREATE/DROP tables (_initialize, _uninstall) — uses withTx
+    _schema.ts            — CREATE/DROP tables (_initialize, _uninstall) — db.transaction + tx.exec
     _register.ts          — UPSERT job row (keyed on tenant_id + name); takes timezone
     _claim-next.ts        — FOR UPDATE SKIP LOCKED atomic claim; issues lease_token
     _execute.ts           — retry loop, timeout, success/failure dispatch; passes AbortSignal to handler;
                             re-scopes the context to the job's tenant; runs the heartbeat
     _next-run.ts          — _nextRunAt(): THE next_run_at computation (schedule-relative, tz, missed ticks skipped)
     _heartbeat.ts         — _startHeartbeat(): renews last_run_at while lease_token matches; reports lease loss
-    _handle-success.ts    — next_run_at via _nextRunAt after success; real TX via withTx; lease_token fence
+    _handle-success.ts    — next_run_at via _nextRunAt after success; real TX (db.transaction); lease_token fence
     _handle-failure.ts    — next_run_at via _nextRunAt after all attempts fail; real TX; lease_token fence
                             also exports _backoffMs and DEFAULT_MAX_BACKOFF_MS (5 min)
     _find.ts              — _findByName, _fetchAll (tenant-scoped, fully parameterised)
@@ -41,10 +41,11 @@ src/
     utils/
       sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ (test timer hygiene) + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
-      with-tx.ts          — withTx(db, async (client) => …) — works on Pool AND Client; exports isPool()
+      driver.ts           — CronDb (pg.Pool | pg.Client | sqlkit Driver), toDriver() (one cached driver
+                            per pool/client, refuses a non-pg dialect), isDriver(), isPool()
       unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
       with-db-retry.ts    — withDbRetry() with exponential backoff
-      db-health.ts        — DbHealthMonitor, checkDbHealth()
+      db-health.ts        — DbHealthMonitor, checkDbHealth() (take a CronDb, query via toDriver)
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
@@ -52,6 +53,8 @@ tests/
   cron-db.test.ts         — 34 integration tests (requires DB, includes tenant_id scoping + legacy migration
                             + eight concurrent initializers on fresh tables)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
+  driver.test.ts          — 5 tests: a host's sqlkit Driver as `db`, non-pg dialect and missing db refused,
+                            one driver (one pool `error` listener) per pool, CronDb exported
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
                             shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
                             heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
@@ -95,18 +98,22 @@ Do not "simplify" this to `getNextRun(now)`: a worker whose clock lags the DB wo
 
 `enable()` applies the same rule at the management layer: a job that was disabled and whose `next_run_at` passed meanwhile is moved to the next slot (atomic `CASE` in the UPDATE; a no-op for an already-enabled job).
 
-### 3. Real transactions on `pg.Pool` (CRITICAL)
+### 3. Real transactions through the driver (CRITICAL)
 
-`pool.query("BEGIN")` does NOT open a transaction — pg returns the connection right after, and `UPDATE` / `COMMIT` run on **different** connections. Anywhere a transaction is required, use:
+`context.db` is a sqlkit `Driver`, built once by `toDriver(db)` in the constructor (and in `Cron.migrate`) from the host's `pg.Pool`, `pg.Client` or `Driver`. Never send `BEGIN` / `COMMIT` yourself: through a pool each statement may take a different connection. Anywhere a transaction is required, use:
 
 ```typescript
-import { withTx } from "./utils/with-tx.ts";
-
-await withTx(context.db, async (client) => {
-  await client.query("UPDATE …");
-  await someHelper(context, …, client);  // pass client through to inner helpers
+await context.db.transaction(async (tx) => {
+  await tx.query("UPDATE …", [/* values */]);
+  await someHelper(context, …, tx);  // pass tx through to inner helpers
 });
 ```
+
+The driver checks the `COMMIT` (a transaction a failed statement aborted rejects with `TransactionAbortedError`), destroys a connection whose `ROLLBACK` failed, and wraps every database error in a sqlkit `SqlError` (node-postgres's `code` and `message`, the original as `cause`).
+
+- `query(text, values)` runs **one** statement; a script of several (the schema, `_schemaDrop`, the `Cron.migrate` steps) goes through `exec(script)`, which takes no values.
+- Type a row read: `db.query<CronJob>(…)`. `rowCount` is always a number.
+- Never call the driver's `close()`: it ends the host's pool or client. `toDriver` caches one driver per pool/client object (a `WeakMap`) because building one adds an `error` listener to the pool; a host's own `Driver` is used as it is.
 
 Currently used in:
 
@@ -115,9 +122,9 @@ Currently used in:
 - `_schema.ts` `_initialize` / `_uninstall`
 - `Cron.migrate` (static method)
 
-Inner helpers (`_logRunSuccess`, `_logRunError`, `_logRunStart`) accept an optional `client?` parameter — pass `client` for the transactional path, omit for autocommit.
+Inner helpers (`_logRunSuccess`, `_logRunError`, `_logRunStart`) accept an optional `client?: Driver` — pass `tx` for the transactional path, omit for autocommit. (Inside a transaction callback `tx` and `context.db` are the same object; the async context decides which transaction a statement is in. Pass `tx` anyway: it says what is meant.)
 
-A single `pg.Client` is one session: every statement issued on it while a `withTx` is open lands inside that transaction. Hence `start()` clamps a `pg.Client` to **one** processor (`isPool()` check, logs a warning). `pg.Pool` is the supported path for concurrency.
+A single `pg.Client` is one session: its driver reports `capabilities.concurrentWriters: false`, and `start()` clamps it to **one** processor (logs a warning). `pg.Pool` is the supported path for concurrency.
 
 ### 4. Lease token fence (CRITICAL for stale recovery)
 
@@ -157,7 +164,7 @@ All tables are prefixed: `${tablePrefix}__cron` and `${tablePrefix}__cron_run_lo
 
 ### 10. CronContext
 
-Internal functions receive `CronContext` (not the `Cron` class). It holds `db`, `tableNames`, `logger`, `pubsubDone`, `pubsubError`, `tenantId`. Handler keys in `#handlers` Map and pubsub channels use composite format: `${tenantId}\0${name}`.
+Internal functions receive `CronContext` (not the `Cron` class). It holds `db` (a sqlkit `Driver`), `tableNames`, `logger`, `pubsubDone`, `pubsubError`, `tenantId`. Handler keys in `#handlers` Map and pubsub channels use composite format: `${tenantId}\0${name}`.
 
 ### 11. Day-of-month + day-of-week semantics
 
@@ -275,7 +282,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 
 ### Migration
 
-`Cron.migrate(db, tablePrefix?)` is the single migration entry point. Runs in a real transaction (works on Pool). Idempotent. Currently bundles:
+`Cron.migrate(db, tablePrefix?)` is the single migration entry point. Takes a `CronDb`; runs in one `transaction`, each step a script through `tx.exec` (works on Pool, Client or Driver). Idempotent. Currently bundles:
 
 - legacy → current: rename the pre-rename `project_id` column + its indexes to `tenant_id` in place (guarded `DO` block + `ALTER INDEX IF EXISTS`); preserves data. The only place the legacy `project_id` literal is still allowed to appear.
 - v1 → v2: add `tenant_id` columns + reshape indexes
@@ -298,13 +305,14 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - Test 9 (timeout): handler's `sleep(500)` is abandoned by TimeoutError at 50ms; test waits 700ms to let the timer fire during the test — avoids cross-test leaks
 - **No test may straddle a schedule slot.** A `* * * * *` job comes due again at every minute boundary, so a test that asserts an exact number of runs, or that a job did not run, registers its job with the yearly expression `0 0 1 1 *` (the `YEARLY` constant of the DB test files) and backdates it to make it due once. A test that has to keep a per-minute job calls `clearOfMinuteBoundary()` from `tests/_time.ts` first. Wait for a run through `onDone` rather than a fixed sleep where the next step depends on it being recorded (test 15)
 - Test 6 (missed ticks): 10-minute backdate on a per-minute job must yield exactly 1 run and a future `next_run_at`; it keeps `* * * * *`, so it calls `clearOfMinuteBoundary()` before its setup
-- `tests/cron-fixes-2.test.ts`: `failNextTxCheckouts(db, n)` makes the next `n` `withTx` checkouts fail with `ECONNRESET` while `pool.query()` keeps working (bare `pool.connect()` vs `pool.connect(cb)`)
+- cron checks a connection out with a bare `pool.connect()` for every statement and every transaction; the tests' own `pool.query()` goes through `pool.connect(cb)`. Statements reach the client as a config object (`{ text, values }`) with lower-case `begin` / `commit`: read `typeof q === "string" ? q : q.text` and match case-insensitively, by verb and table name
+- `tests/cron-fixes-2.test.ts`: `failNextTxCheckouts(db, n)` makes the next `n` bare checkouts fail with `ECONNRESET` while `pool.query()` keeps working. It cannot tell a transaction from a statement, so the R6 tests arm it from inside the handler, where the next checkout is the finalization's
 - Heartbeat tests set `heartbeatIntervalMs: 40`; the 30 s default never fires inside a test
 - Tests 21-31: tenant_id scoping (isolation, find, unregister, enable/disable, claim)
 - Test 32: legacy `project_id` → `tenant_id` migration (column + indexes renamed in place, data preserved, idempotent)
 - Test 33: legacy migration with a mixed-case `tablePrefix`, run twice — `colExists()` and `addCheckIfMissing` lower-case identifiers to match Postgres folding (else the rename silently no-ops, or the second call re-adds a CHECK constraint and fails)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
-- `tests/cron-fixes.test.ts`: covers withTx atomicity / rollback, lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
+- `tests/cron-fixes.test.ts`: covers the finalization's transaction (B1: one connection from `begin` to `commit`; a failed run-log write rolls the job row back — `recordCheckouts()` records each checkout's statements), lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
 - `tests/statements.test.ts` (S1–S8): pins, through the public API, what a statement binds and reads back — payload, result and `error_details` after the JSON round trip, the optional filters and pages of `fetchAll` / `getRunHistory`, the unregister cascade, and the health status. A change to how statements are built must keep it green unchanged. It deliberately does not assert the `latencyMs` or the error text of an unhealthy status, nor the class of a rejected database call. Its `settled(cron, names)` helper waits for each job's `onDone` / `onError`
 
 ### Avoiding leaked timers in tests with abandoned handlers
@@ -339,7 +347,7 @@ export { Cron, DEFAULT_TENANT_ID } from "./cron.ts";
 export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
 export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler,
               CronOptions, CronRegisterOptions, CronContext,
-              CronTenantScope, CronStopOptions } from "./cron.ts";
+              CronTenantScope, CronStopOptions, CronDb } from "./cron.ts";
 export { CronParser, type CronParserOptions } from "@marianmeres/cron-parser"; // re-export
 
 // Task Registry
@@ -358,10 +366,10 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For scheduling logic changes: go through `_nextRunAt` (`_next-run.ts`); never compute `next_run_at` elsewhere
 - [ ] For anything written on behalf of a claimed job: use the job-tenant context, keep it OUTSIDE the handler's `try`
 - [ ] For new write paths against a claimed row: include `lease_token` fence in WHERE
-- [ ] For multi-statement DB work: use `withTx` (NOT `db.query("BEGIN")` on a Pool)
+- [ ] For multi-statement DB work: use `context.db.transaction(async (tx) => …)` (never send `BEGIN` yourself); a script of several statements goes through `exec`
 - [ ] For new management queries: always include `tenant_id` filtering
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 86 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 91 tests); `pnpm run format` before committing
 - [ ] DB integration tests require `TEST_PG_*` env vars

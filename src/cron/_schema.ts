@@ -1,5 +1,4 @@
 import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
-import { withTx } from "./utils/with-tx.ts";
 
 export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
 	const { tableCron, tableCronRunLog } = context.tableNames;
@@ -91,19 +90,20 @@ export async function _initialize(context: CronContext, hard = false): Promise<v
 		.filter(Boolean)
 		.join("\n");
 
-	await withTx(context.db, async (client) => {
+	await context.db.transaction(async (tx) => {
 		// Serialize concurrent initializers (N replicas booting on a fresh database): two
 		// CREATE TABLE IF NOT EXISTS at once collide in pg_type. Transaction-scoped, so it
 		// is released by COMMIT or ROLLBACK.
-		await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+		await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
 			`cron:${context.tableNames.tableCron}`,
 		]);
-		await client.query(sql);
+		// A script of several statements: `exec`, never `query` (one statement only).
+		await tx.exec(sql);
 	});
 }
 
 export async function _uninstall(context: CronContext): Promise<void> {
-	await withTx(context.db, async (client) => {
-		await client.query(_schemaDrop(context));
+	await context.db.transaction(async (tx) => {
+		await tx.exec(_schemaDrop(context));
 	});
 }

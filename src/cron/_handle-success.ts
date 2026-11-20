@@ -1,12 +1,11 @@
 import { _logRunSuccess } from "./_log-run.ts";
 import { _nextRunAt } from "./_next-run.ts";
 import { CRON_STATUS, type CronContext, type CronJob, RUN_STATUS } from "./cron.ts";
-import { withTx } from "./utils/with-tx.ts";
 
 /**
  * Handles successful execution of a cron job.
  *
- * In a single real transaction (one physical pg connection):
+ * In a single real transaction (`context.db.transaction()`, one connection):
  * 1. Sets the job back to `idle` (only if `lease_token` still matches —
  *    a stale-recovered job will silently no-op here)
  * 2. Advances `next_run_at` via `_nextRunAt` (relative to the intended
@@ -31,7 +30,7 @@ export async function _handleCronSuccess(
 
 	const nextRunAt = _nextRunAt(job, scheduledAt);
 
-	return await withTx(context.db, async (client) => {
+	return await context.db.transaction(async (tx) => {
 		const params: unknown[] = [
 			CRON_STATUS.IDLE,
 			RUN_STATUS.SUCCESS,
@@ -44,7 +43,7 @@ export async function _handleCronSuccess(
 			leaseClause = ` AND lease_token = $${params.length}`;
 		}
 
-		const { rows } = await client.query(
+		const { rows } = await tx.query<CronJob>(
 			`UPDATE ${tableCron}
 			SET status          = $1,
 				last_run_status = $2,
@@ -58,7 +57,7 @@ export async function _handleCronSuccess(
 		);
 
 		// Always finalise the run log — the run did happen, even if the lease was lost
-		await _logRunSuccess(context, runLogId, result, client);
+		await _logRunSuccess(context, runLogId, result, tx);
 
 		// If the WHERE didn't match (lease lost), return the original job for the event payload
 		return (rows[0] as CronJob | undefined) ?? job;

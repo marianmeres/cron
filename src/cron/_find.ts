@@ -8,12 +8,12 @@ export async function _findByName(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const { rows } = await db.query(
+	const { rows } = await db.query<CronJob>(
 		`SELECT * FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
 		[context.tenantId, name],
 	);
 
-	return (rows[0] as CronJob) ?? null;
+	return rows[0] ?? null;
 }
 
 /**
@@ -62,6 +62,6 @@ export async function _fetchAll(
 		parts.push(`OFFSET $${params.length}`);
 	}
 
-	const { rows } = await db.query(parts.join(" "), params);
-	return rows as CronJob[];
+	const { rows } = await db.query<CronJob>(parts.join(" "), params);
+	return rows;
 }

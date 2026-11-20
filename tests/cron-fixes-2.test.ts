@@ -110,12 +110,14 @@ async function fetchRunLog(db: pg.Pool) {
 }
 
 /**
- * Makes the next `n` transaction checkouts fail with a retryable error.
+ * Makes the next `n` checkouts fail with a retryable error.
  *
- * `withTx` checks a connection out with a bare `pool.connect()`; `pool.query()`
- * goes through `pool.connect(callback)`. Only the former is sabotaged, so the
- * claim and run-log queries keep working while the result TX "loses its
- * connection".
+ * cron checks a connection out with a bare `pool.connect()` for every statement
+ * and every transaction alike; the tests' own `pool.query()` goes through
+ * `pool.connect(callback)` and is left alone. So this cannot tell the
+ * transaction that records a run from any other statement: arm it from inside
+ * the handler, when the claim and the run-log INSERT are done and the next
+ * checkout is the finalization's.
  */
 function failNextTxCheckouts(db: pg.Pool, n: number) {
 	const original = db.connect.bind(db);
@@ -474,14 +476,13 @@ test("R6: dbRetry covers the result write — a succeeded handler is not re-run"
 			YEARLY,
 			async () => {
 				calls++;
+				// The transaction that records the success loses its connection once
+				failNextTxCheckouts(db, 1);
 				return "ok";
 			},
 			{ max_attempts: 3 },
 		);
 		await backdate(db, "once");
-
-		// The transaction that records the success loses its connection once
-		failNextTxCheckouts(db, 1);
 
 		await cron.start(1);
 		await sleep(400);
@@ -511,12 +512,12 @@ test("R6: a failed result write is reported as such, never as a handler failure"
 			YEARLY,
 			async () => {
 				calls++;
+				failNextTxCheckouts(db, 1);
 				return "ok";
 			},
 			{ max_attempts: 3 },
 		);
 		await backdate(db, "once");
-		failNextTxCheckouts(db, 1);
 
 		await cron.start(1);
 		await sleep(300);

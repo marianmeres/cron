@@ -34,7 +34,7 @@ export async function _register(
 
 	const conflictNextRun = forceRecalculate ? "next_run_at = EXCLUDED.next_run_at," : "";
 
-	const { rows } = await db.query(
+	const { rows } = await db.query<CronJob>(
 		`INSERT INTO ${tableCron}
 			(tenant_id, name, expression, timezone, payload, enabled, next_run_at,
 			 max_attempts, max_attempt_duration_ms, backoff_strategy)
@@ -64,5 +64,5 @@ export async function _register(
 		],
 	);
 
-	return rows[0] as CronJob;
+	return rows[0];
 }

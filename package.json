@@ -67,8 +67,7 @@
     "@marianmeres/modelize": "^3.0.0",
     "@marianmeres/parse-boolean": "^2.1.0",
     "@marianmeres/pubsub": "^3.0.0",
-    "@types/pg": "^8.23.1",
-    "pg": "^8.23.1"
+    "@marianmeres/sqlkit": "^0.2.0"
   },
   "peerDependencies": {
     "ajv": "^8.20.0"
@@ -81,7 +80,9 @@
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",
     "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
     "ajv": "^8.20.0",
+    "pg": "^8.23.1",
     "typescript": "^7.0.2"
   }
 }

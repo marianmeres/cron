@@ -6,7 +6,6 @@ import {
 	type CronJob,
 	RUN_STATUS,
 } from "./cron.ts";
-import { withTx } from "./utils/with-tx.ts";
 
 /** Default cap on inter-attempt exponential backoff. */
 export const DEFAULT_MAX_BACKOFF_MS = 5 * 60 * 1_000; // 5 minutes
@@ -18,8 +17,9 @@ export const DEFAULT_MAX_BACKOFF_MS = 5 * 60 * 1_000; // 5 minutes
  * with a new `next_run_at` so it will be retried on the next scheduled cycle.
  *
  * `next_run_at` comes from `_nextRunAt` (schedule-relative, in the job's
- * timezone, missed ticks skipped). Wrapped in a real transaction (single pg
- * connection) so the row update is committed atomically. Run log entries are
+ * timezone, missed ticks skipped). Wrapped in a real transaction
+ * (`context.db.transaction()`, one connection) so the row update is committed
+ * atomically. Run log entries are
  * already written per-attempt by the caller.
  *
  * The `WHERE` clause checks `lease_token` so a stale-recovered job does not
@@ -38,7 +38,7 @@ export async function _handleCronFailure(
 	const nextRunAt = _nextRunAt(job, scheduledAt);
 	const runStatus = isTimeout ? RUN_STATUS.TIMEOUT : RUN_STATUS.ERROR;
 
-	return await withTx(context.db, async (client) => {
+	return await context.db.transaction(async (tx) => {
 		const params: unknown[] = [CRON_STATUS.IDLE, runStatus, nextRunAt, job.id];
 		let leaseClause = "";
 		if (leaseToken !== null) {
@@ -46,7 +46,7 @@ export async function _handleCronFailure(
 			leaseClause = ` AND lease_token = $${params.length}`;
 		}
 
-		const { rows } = await client.query(
+		const { rows } = await tx.query<CronJob>(
 			`UPDATE ${tableCron}
 			SET status          = $1,
 				last_run_status = $2,

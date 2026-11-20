@@ -16,7 +16,7 @@ export async function _healthPreview(
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 
-	const { rows } = await db.query(
+	const { rows } = await db.query<CronHealthPreviewRow>(
 		`SELECT
 			status,
 			COUNT(*)::int AS count,

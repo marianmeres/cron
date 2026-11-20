@@ -1,7 +1,7 @@
 /**
  * Tests covering bug-fixes / behaviour additions in this release:
  *
- * - B1: real transactions on `pg.Pool` (handle-success / handle-failure)
+ * - B1: a run is finalized in one real transaction (job row + run log, or neither)
  * - B4: per-instance onEvent wrap cache, no first-unsub-kills-others bug
  * - B5: lease_token fence — stale-recovered jobs cannot clobber fresh writes
  * - B6: stop({ drainTimeoutMs }) returns even when a handler ignores abort
@@ -21,7 +21,6 @@ import type pg from "pg";
 import { _backoffMs, DEFAULT_MAX_BACKOFF_MS } from "../src/cron/_handle-failure.ts";
 import { sleep } from "../src/cron/utils/sleep.ts";
 import { TimeoutError, withTimeout } from "../src/cron/utils/with-timeout.ts";
-import { withTx } from "../src/cron/utils/with-tx.ts";
 import {
 	CRON_STATUS,
 	Cron,
@@ -90,53 +89,147 @@ async function fetchJob(db: pg.Pool, name: string) {
 // B1: real transactions
 // =========================================================================
 
-test("B1: withTx commits all writes on the same connection", async () => {
-	const db = createPg();
+/** One statement a checked-out client ran, with the index of that checkout. */
+interface Recorded {
+	checkout: number;
+	text: string;
+}
+
+/**
+ * Records every statement a client checked out with a bare `pool.connect()` runs, with
+ * the index of its checkout. (The tests' own `db.query()` goes through
+ * `pool.connect(callback)` and is not recorded.) Statements arrive as a string or as a
+ * config object, so the text is read from either.
+ *
+ * `rejectOnce` makes the first statement matching it fail once, with a plain `Error`,
+ * without reaching the database.
+ */
+function recordCheckouts(db: pg.Pool, rejectOnce?: RegExp): Recorded[] {
+	type Query = (q: string | { text: string }, ...rest: unknown[]) => Promise<unknown>;
+	type Client = { query: Query; release: (...a: unknown[]) => void };
+	const log: Recorded[] = [];
+	const pool = db as unknown as { connect: (...args: unknown[]) => Promise<unknown> };
+	const connect = pool.connect.bind(db);
+	let checkouts = 0;
+	let armed = rejectOnce;
+	pool.connect = async (...args: unknown[]) => {
+		if (args.length > 0) return connect(...args);
+		const client = (await connect()) as Client;
+		const checkout = checkouts++;
+		const query = client.query;
+		const release = client.release;
+		client.query = (q, ...rest) => {
+			const text = typeof q === "string" ? q : q.text;
+			log.push({ checkout, text });
+			if (armed?.test(text)) {
+				armed = undefined;
+				return Promise.reject(new Error("simulated run-log write failure"));
+			}
+			return query.call(client, q, ...rest);
+		};
+		// The pool hands the same client out again: unwrap it on its way back
+		client.release = (...a) => {
+			client.query = query;
+			client.release = release;
+			release.apply(client, a);
+		};
+		return client;
+	};
+	return log;
+}
+
+const RE_UPDATE_CRON = /update\s+\S*__cron\s/i;
+const RE_UPDATE_RUN_LOG = /update\s+\S*__cron_run_log\s/i;
+
+/** Resolves once `cond()` holds; rejects after `ms`. */
+async function until(cond: () => boolean, ms = 5_000, label = "condition") {
+	const deadline = Date.now() + ms;
+	while (!cond()) {
+		if (Date.now() > deadline) throw new Error(`${label}: not met within ${ms} ms`);
+		await sleep(10);
+	}
+}
+
+test("B1: a run is finalized in one transaction, on one connection", async () => {
+	const { db, cron } = await setup();
 	try {
-		await withTx(db, async (client) => {
-			await client.query(`CREATE TEMP TABLE _tx_probe (v INT) ON COMMIT DROP`);
-			await client.query(`INSERT INTO _tx_probe VALUES (1), (2), (3)`);
-			const { rows } = await client.query(
-				`SELECT COUNT(*)::int AS n FROM _tx_probe`,
-			);
-			assert.deepStrictEqual(rows[0].n, 3);
+		let calls = 0;
+		await cron.register("tx-ok", YEARLY, async () => {
+			calls++;
+			return "ok";
 		});
-		// After commit, the temp table is gone (ON COMMIT DROP). A different
-		// pool checkout proves the table no longer exists.
-		const { rows } = await db.query(
-			`SELECT to_regclass('_tx_probe') IS NULL AS gone`,
+		await backdate(db, "tx-ok");
+		const done = new Promise<void>((resolve) =>
+			cron.onDone("tx-ok", () => resolve()),
 		);
-		assert.deepStrictEqual(rows[0].gone, true);
+		const log = recordCheckouts(db);
+
+		await cron.start(1);
+		await done;
+		await cron.stop();
+		assert.deepStrictEqual(calls, 1);
+
+		// The run-log UPDATE is the finalization's alone (the start of a run INSERTs)
+		const runLogUpdate = log.find((r) => RE_UPDATE_RUN_LOG.test(r.text));
+		assert.ok(runLogUpdate, "the finalization must UPDATE the run log");
+
+		// Everything that checkout ran, from its `begin` to its `commit`
+		const tx = log
+			.filter((r) => r.checkout === runLogUpdate.checkout)
+			.map((r) => r.text);
+		assert.match(tx[0], /^\s*begin\b/i, `expected begin first, got: ${tx[0]}`);
+		assert.match(tx.at(-1) ?? "", /^\s*commit\b/i, `expected commit last: ${tx}`);
+		assert.ok(
+			tx.some((t) => RE_UPDATE_CRON.test(t)),
+			"the job row UPDATE must be on the same connection",
+		);
+		assert.ok(tx.some((t) => RE_UPDATE_RUN_LOG.test(t)));
+
+		const row = await fetchJob(db, "tx-ok");
+		assert.deepStrictEqual(row.status, CRON_STATUS.IDLE);
+		assert.deepStrictEqual(row.last_run_status, RUN_STATUS.SUCCESS);
 	} finally {
-		await db.end();
+		await teardown(cron, db);
 	}
 });
 
-test("B1: withTx rolls back on error", async () => {
+test("B1: a failed run-log write rolls the job row back with it", async () => {
+	const errors: string[] = [];
+	const logger = {
+		...noopLogger,
+		error: (...a: unknown[]) => void errors.push(a.join(" ")),
+	} as Logger;
 	const db = createPg();
+	const cron = createCron(db, { logger });
+	await cron.resetHard();
 	try {
-		// Use a real, persistent table so we can probe across connections
-		await db.query(`DROP TABLE IF EXISTS _tx_rollback_probe`);
-		await db.query(`CREATE TABLE _tx_rollback_probe (v INT)`);
+		let calls = 0;
+		await cron.register("tx-fail", YEARLY, async () => {
+			calls++;
+			return "ok";
+		});
+		await backdate(db, "tx-fail");
+		recordCheckouts(db, RE_UPDATE_RUN_LOG);
 
-		try {
-			await withTx(db, async (client) => {
-				await client.query(`INSERT INTO _tx_rollback_probe VALUES (1)`);
-				throw new Error("boom");
-			});
-			assert.ok(false, "withTx should have rethrown");
-		} catch (e) {
-			assert.deepStrictEqual((e as Error).message, "boom");
-		}
-
-		const { rows } = await db.query(
-			`SELECT COUNT(*)::int AS n FROM _tx_rollback_probe`,
+		await cron.start(1);
+		await until(
+			() => errors.some((l) => l.includes("could not record the run")),
+			5_000,
+			"bookkeeping error",
 		);
-		assert.deepStrictEqual(rows[0].n, 0, "insert must have been rolled back");
+		await cron.stop();
 
-		await db.query(`DROP TABLE _tx_rollback_probe`);
+		assert.deepStrictEqual(calls, 1, "the handler ran once");
+
+		// The job row UPDATE went with the rollback: still claimed, lease intact
+		const row = await fetchJob(db, "tx-fail");
+		assert.deepStrictEqual(row.status, CRON_STATUS.RUNNING);
+		assert.ok(row.lease_token, "lease_token must still be set");
+
+		// …so stale recovery picks it up
+		assert.deepStrictEqual(await cron.cleanup(0), 1);
 	} finally {
-		await db.end();
+		await teardown(cron, db);
 	}
 });
 

@@ -1,8 +1,5 @@
-import type pg from "pg";
+import type { Driver } from "@marianmeres/sqlkit";
 import { type CronContext, type CronRunLog, RUN_STATUS } from "./cron.ts";
-
-/** A pg client or pool that we can call `query()` on. */
-type Queryable = pg.PoolClient | pg.Client | pg.Pool;
 
 /** Opens a new run log entry. Returns the inserted row id. */
 export async function _logRunStart(
@@ -11,33 +8,33 @@ export async function _logRunStart(
 	cronName: string,
 	scheduledAt: Date,
 	attemptNumber: number,
-	client?: Queryable,
+	client?: Driver,
 ): Promise<number> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 	const q = client ?? db;
 
-	const { rows } = await q.query(
+	const { rows } = await q.query<{ id: number }>(
 		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, tenant_id, scheduled_at, attempt_number)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
 		[cronId, cronName, context.tenantId, scheduledAt, attemptNumber],
 	);
 
-	return rows[0].id as number;
+	return rows[0].id;
 }
 
 /**
  * Finalises a run log entry as successful.
  *
- * Pass `client` to run inside an existing transaction; otherwise the call
- * runs in autocommit mode against `context.db`.
+ * Pass the `tx` of an open `context.db.transaction()` to run inside it; otherwise
+ * the call runs in autocommit mode against `context.db`.
  */
 export async function _logRunSuccess(
 	context: CronContext,
 	runLogId: number,
 	result: unknown,
-	client?: Queryable,
+	client?: Driver,
 ): Promise<void> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -67,7 +64,7 @@ export async function _logRunError(
 	errMessage: string,
 	errDetails: { stack: string } | null,
 	status: typeof RUN_STATUS.ERROR | typeof RUN_STATUS.TIMEOUT,
-	client?: Queryable,
+	client?: Driver,
 ): Promise<void> {
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
@@ -116,8 +113,8 @@ export async function _logRunFetchAll(
 		parts.push(`OFFSET $${params.length}`);
 	}
 
-	const { rows } = await db.query(parts.join(" "), params);
-	return rows as CronRunLog[];
+	const { rows } = await db.query<CronRunLog>(parts.join(" "), params);
+	return rows;
 }
 
 /**
@@ -146,5 +143,5 @@ export async function _logRunPrune(
 		: [olderThanMinutes];
 
 	const result = await db.query(sql, params);
-	return result.rowCount ?? 0;
+	return result.rowCount;
 }

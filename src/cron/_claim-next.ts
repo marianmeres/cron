@@ -18,7 +18,7 @@ export async function _claimNextCronJob(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const result = await db.query(
+	const result = await db.query<CronJob & { lease_token: string }>(
 		`UPDATE ${tableCron}
 		SET status      = $1,
 			last_run_at = NOW(),

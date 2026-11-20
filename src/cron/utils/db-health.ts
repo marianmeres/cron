@@ -7,7 +7,7 @@
  */
 
 import type { Logger } from "@marianmeres/clog";
-import type pg from "pg";
+import { type CronDb, toDriver } from "./driver.ts";
 
 /**
  * Represents the result of a database health check.
@@ -31,7 +31,7 @@ export interface DbHealthStatus {
  * Executes a simple query to verify connectivity and measure latency.
  * Also retrieves the PostgreSQL version.
  *
- * @param db - PostgreSQL connection pool or client
+ * @param db - A `pg.Pool`, a `pg.Client` or a sqlkit `Driver`
  * @param logger - Optional logger for error reporting
  * @returns Health status with connectivity, latency, and version info
  *
@@ -44,7 +44,7 @@ export interface DbHealthStatus {
  * ```
  */
 export async function checkDbHealth(
-	db: pg.Pool | pg.Client,
+	db: CronDb,
 	logger?: Logger,
 ): Promise<DbHealthStatus> {
 	const start = Date.now();
@@ -52,7 +52,9 @@ export async function checkDbHealth(
 
 	try {
 		// Simple query to test connection
-		const result = await db.query("SELECT version(), NOW() as now");
+		const result = await toDriver(db).query<{ version: string }>(
+			"SELECT version(), NOW() as now",
+		);
 		const latencyMs = Date.now() - start;
 
 		return {
@@ -96,7 +98,7 @@ export async function checkDbHealth(
  * ```
  */
 export class DbHealthMonitor {
-	#db: pg.Pool | pg.Client;
+	#db: CronDb;
 	#logger?: Logger;
 	#intervalMs: number;
 	#timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -108,11 +110,11 @@ export class DbHealthMonitor {
 	/**
 	 * Creates a new DbHealthMonitor instance.
 	 *
-	 * @param db - PostgreSQL connection pool or client
+	 * @param db - A `pg.Pool`, a `pg.Client` or a sqlkit `Driver`
 	 * @param options - Monitor configuration options
 	 */
 	constructor(
-		db: pg.Pool | pg.Client,
+		db: CronDb,
 		options: {
 			/** Check interval in milliseconds (default: 30000) */
 			intervalMs?: number;

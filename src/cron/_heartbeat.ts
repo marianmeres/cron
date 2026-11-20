@@ -56,7 +56,7 @@ export function _startHeartbeat(
 				WHERE id = $1 AND lease_token = $2`,
 				[job.id, leaseToken],
 			);
-			if (!stopped && (res.rowCount ?? 0) === 0) {
+			if (!stopped && res.rowCount === 0) {
 				stop();
 				logger?.warn?.(`Cron job ${label}: lease lost, aborting this execution`);
 				onLeaseLost();

@@ -2,7 +2,7 @@ import process from "node:process";
 import { createClog, type Logger } from "@marianmeres/clog";
 import { CronParser } from "@marianmeres/cron-parser";
 import { createPubSub, type Subscriber, type Unsubscriber } from "@marianmeres/pubsub";
-import type pg from "pg";
+import type { Driver } from "@marianmeres/sqlkit";
 import { _claimNextCronJob } from "./_claim-next.ts";
 import { _executeCronJob } from "./_execute.ts";
 import { _fetchAll, _findByName } from "./_find.ts";
@@ -17,9 +17,11 @@ import {
 	DbHealthMonitor,
 	type DbHealthStatus,
 } from "./utils/db-health.ts";
+import { type CronDb, toDriver } from "./utils/driver.ts";
 import { sleep } from "./utils/sleep.ts";
 import { type DbRetryOptions, withDbRetry } from "./utils/with-db-retry.ts";
-import { isPool } from "./utils/with-tx.ts";
+
+export type { CronDb } from "./utils/driver.ts";
 
 /**
  * Default tenant identifier used when no `tenantId` is specified.
@@ -80,7 +82,8 @@ export type CronHandler = (job: CronJob, signal?: AbortSignal) => any | Promise<
  * @internal
  */
 export interface CronContext {
-	db: pg.Pool | pg.Client;
+	/** What every statement runs on; transactions are `db.transaction(async (tx) => …)`. */
+	db: Driver;
 	tableNames: {
 		tableCron: string;
 		tableCronRunLog: string;
@@ -202,12 +205,14 @@ export interface CronRegisterOptions {
  */
 export interface CronOptions {
 	/**
-	 * PostgreSQL connection. Use a `pg.Pool` for anything real: a single
-	 * `pg.Client` is one session, so it is limited to **one** processor
-	 * (`start()` clamps the count) and its statements share whatever
-	 * transaction happens to be open on that session.
+	 * PostgreSQL connection: a `pg.Pool`, a `pg.Client` or a sqlkit `Driver` whose
+	 * dialect is `pg` (anything else is a `TypeError` here). Use a `pg.Pool` for
+	 * anything real: a single `pg.Client` is one session, so it is limited to
+	 * **one** processor (`start()` clamps the count).
+	 *
+	 * cron never ends the pool, the client or the driver: they stay the host's.
 	 */
-	db: pg.Pool | pg.Client;
+	db: CronDb;
 	logger?: Logger;
 	/** Tenant scope identifier (default: '_default') */
 	tenantId?: string;
@@ -361,7 +366,7 @@ export class Cron {
 	readonly gracefulSigterm: boolean;
 	readonly tablePrefix: string;
 
-	#db: pg.Pool | pg.Client;
+	#db: Driver;
 	#handlers: Map<string, CronHandler> = new Map();
 	#logger: Logger;
 	#pubsubDone: ReturnType<typeof createPubSub> = createPubSub();
@@ -415,7 +420,8 @@ export class Cron {
 			heartbeatIntervalMs = 30_000,
 		} = options || {};
 
-		this.#db = db;
+		// Fails here, not at the first query, when `db` is missing or of another dialect
+		this.#db = toDriver(db);
 		this.#logger = logger;
 		this.pollTimeoutMs = pollTimeoutMs;
 		this.tablePrefix = tablePrefix;
@@ -654,7 +660,7 @@ export class Cron {
 		const resumeAt =
 			current && !current.enabled ? _nextRunAt(current, new Date()) : null;
 
-		const { rows } = await db.query(
+		const { rows } = await db.query<CronJob>(
 			`UPDATE ${tableCron}
 			SET enabled     = TRUE,
 				next_run_at = CASE
@@ -667,21 +673,21 @@ export class Cron {
 			RETURNING *`,
 			[tenantId, name, resumeAt],
 		);
-		return rows[0] as CronJob;
+		return rows[0];
 	}
 
 	async #doDisable(tenantId: string, name: string): Promise<CronJob> {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
-		const { rows } = await db.query(
+		const { rows } = await db.query<CronJob>(
 			`UPDATE ${tableCron}
 			SET enabled = FALSE, updated_at = NOW()
 			WHERE tenant_id = $1 AND name = $2
 			RETURNING *`,
 			[tenantId, name],
 		);
-		return rows[0] as CronJob;
+		return rows[0];
 	}
 
 	async #doFind(tenantId: string, name: string): Promise<CronJob | null> {
@@ -892,8 +898,8 @@ export class Cron {
 	 * Processors are global — they claim any due job regardless of tenant.
 	 * One `start()` call serves all tenants.
 	 *
-	 * With a single `pg.Client` as `db` the count is clamped to 1 (see
-	 * `CronOptions.db`).
+	 * With a single `pg.Client` as `db` (or any driver over one connection) the
+	 * count is clamped to 1 (see `CronOptions.db`).
 	 *
 	 * @param processorsCount - Number of concurrent workers (default: 2)
 	 * @throws If the schema cannot be initialised, or if a `stop()` is still
@@ -942,12 +948,10 @@ export class Cron {
 			process.on("SIGTERM", this.#sigtermListener);
 		}
 
-		// A single `pg.Client` is ONE session. Concurrent processors would run
-		// their statements inside each other's open transactions (a rollback in
-		// one would undo another's claim), and pg@9 drops the client-side query
-		// queue that makes concurrent `client.query()` calls work at all.
+		// A single `pg.Client` is ONE session: a driver over it reports no
+		// concurrent writers, and its processors would only take turns on it.
 		let count = processorsCount;
-		if (!isPool(this.#db)) {
+		if (!this.#db.capabilities.concurrentWriters) {
 			const allowed = Math.max(0, 1 - this.#jobProcessors.length);
 			if (count > allowed) {
 				this.#logger?.warn?.(
@@ -1347,10 +1351,8 @@ export class Cron {
 	 * Safe to call multiple times — uses `IF NOT EXISTS` / `IF EXISTS`,
 	 * existence-guarded renames, and idempotent CHECK additions.
 	 */
-	static async migrate(
-		db: pg.Pool | pg.Client,
-		tablePrefix: string = "",
-	): Promise<void> {
+	static async migrate(db: CronDb, tablePrefix: string = ""): Promise<void> {
+		const driver = toDriver(db);
 		const { tableCron, tableCronRunLog } = _tableNames(tablePrefix);
 		const safe = (name: string) => `${name}`.replace(/\W/g, "");
 
@@ -1375,9 +1377,6 @@ export class Cron {
 			return `EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = '${bare}'${schemaPred} AND column_name = '${column}')`;
 		};
 
-		// Use the proper transaction helper so this works against a Pool too.
-		const { withTx } = await import("./utils/with-tx.ts");
-
 		const okCronStatuses = [CRON_STATUS.IDLE, CRON_STATUS.RUNNING]
 			.map((v) => `'${v}'`)
 			.join(", ");
@@ -1385,13 +1384,14 @@ export class Cron {
 			.map((v) => `'${v}'`)
 			.join(", ");
 
-		await withTx(db, async (client) => {
+		// Each script holds several statements: `exec`, never `query` (one statement only).
+		await driver.transaction(async (tx) => {
 			// legacy → current: rename the pre-2.x `project_id` column to
 			// `tenant_id` in place (data preserved). Guarded so it only fires when
 			// the legacy column exists and the new one does not — making it a
 			// no-op on fresh installs and on already-migrated schemas. Postgres has
 			// no `IF EXISTS` for `RENAME COLUMN`, hence the DO block.
-			await client.query(`
+			await tx.exec(`
 				DO $$
 				BEGIN
 					IF ${colExists(tableCron, "project_id")}
@@ -1413,7 +1413,7 @@ export class Cron {
 			`);
 
 			// v1 → v2
-			await client.query(`
+			await tx.exec(`
 				ALTER TABLE ${tableCron}
 					ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255) NOT NULL DEFAULT '_default';
 
@@ -1437,7 +1437,7 @@ export class Cron {
 			// tenant of the Cron instance that executed it, not the job's. The
 			// FK makes the owning job unambiguous, so re-stamp from it. A no-op
 			// once repaired.
-			await client.query(`
+			await tx.exec(`
 				UPDATE ${tableCronRunLog} AS l
 				SET tenant_id = c.tenant_id
 				FROM ${tableCron} AS c
@@ -1446,7 +1446,7 @@ export class Cron {
 			`);
 
 			// v2 → v3: lease token + timezone
-			await client.query(`
+			await tx.exec(`
 				ALTER TABLE ${tableCron}
 					ADD COLUMN IF NOT EXISTS lease_token UUID;
 
@@ -1465,12 +1465,12 @@ export class Cron {
 				name: string,
 				expr: string,
 			) => {
-				const exists = await client.query(
+				const exists = await tx.query(
 					`SELECT 1 FROM pg_constraint WHERE conname = $1`,
 					[name.toLowerCase()],
 				);
 				if (exists.rowCount === 0) {
-					await client.query(
+					await tx.exec(
 						`ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`,
 					);
 				}
