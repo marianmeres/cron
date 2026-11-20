@@ -21,7 +21,7 @@ npm install @marianmeres/cron pg
 cron takes the pool or client you build and does not depend on `pg` itself:
 install the `pg` you build it with. It runs on Node 24.20+ or 26.6+ (what its
 database layer, [`@marianmeres/sqlkit`](https://www.npmjs.com/package/@marianmeres/sqlkit),
-asks for).
+asks for). It is an ES module, and `require("@marianmeres/cron")` loads it too.
 
 The package is published to npm only. Version 3.3.0 is the last one on JSR.
 Upgrading from 3.x? See [Upgrading to 4.0](#upgrading-to-40).
@@ -187,9 +187,11 @@ yours to end. When you share a driver with your own code:
   has aborted it.
 - **One pool, one driver.** If cron and another sqlkit-based library (such as
   `@marianmeres/steve`) use the same pool, build one `Driver` and pass it to
-  both. Each library handed the raw pool builds a driver of its own, and two
-  drivers on one pool each take the other's `error` listener for yours, so
-  neither reports a dropped idle connection.
+  both. cron turns a raw pool into a driver with sqlkit's `toPgDriver`, which
+  keeps one per pool, but only callers on the same copy of sqlkit share it: a
+  driver built any other way over that pool is a second one. Two drivers on one
+  pool each take the other's `error` listener for yours, so neither reports a
+  dropped idle connection.
 
 ### Database errors, retry and health
 

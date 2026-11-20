@@ -225,6 +225,7 @@ function pgStub(query: (text: string) => Promise<unknown>): Driver {
 		transaction: async (fn: (tx: Driver) => Promise<unknown>) => await fn(stub),
 		exclusive: async (_name: string, fn: (tx: Driver) => Promise<unknown>) =>
 			await fn(stub),
+		savepoint: async (fn: (tx: Driver) => Promise<unknown>) => await fn(stub),
 		close: async () => {},
 	} as unknown as Driver;
 	return stub;

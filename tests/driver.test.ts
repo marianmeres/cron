@@ -3,7 +3,8 @@
  *
  * - a sqlkit `Driver` the host built is used as it is: jobs run on it, `migrate` too
  * - a driver of another dialect, or no database at all, is a `TypeError` at construction
- * - one driver per pool, however many instances and calls share it (one `error` listener)
+ * - one driver per pool, however many instances and calls share it (one `error` listener),
+ *   and the same one sqlkit's `toPgDriver` hands any other caller
  * - `CronDb` is nameable from the package entry
  *
  * Requires a live PostgreSQL database (TEST_PG_*) just like cron-db.test.ts.
@@ -13,7 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Logger } from "@marianmeres/clog";
 import type { Driver } from "@marianmeres/sqlkit";
-import { createPgDriver } from "@marianmeres/sqlkit/pg";
+import { createPgDriver, toPgDriver } from "@marianmeres/sqlkit/pg";
 import type pg from "pg";
 import {
 	CRON_STATUS,
@@ -143,6 +144,28 @@ test("driver: one driver per pool, however many callers share it", async () => {
 		// The pool's driver listens for `error` once; the host added none
 		assert.deepStrictEqual(pool.listenerCount("error"), 1);
 	} finally {
+		await pool.end();
+	}
+});
+
+test("driver: cron and toPgDriver share the pool's driver", async () => {
+	const pool = createPg();
+	const cron = createCron(pool);
+	try {
+		await cron.resetHard();
+		const driver = toPgDriver(pool);
+		// A job registered inside the host's transaction is part of it
+		await assert.rejects(
+			driver.transaction(async () => {
+				await cron.register("rolled-back", YEARLY, async () => {});
+				throw new Error("roll back");
+			}),
+			/roll back/,
+		);
+		assert.deepStrictEqual(await cron.find("rolled-back"), null);
+		assert.deepStrictEqual(pool.listenerCount("error"), 1);
+	} finally {
+		cron.unsubscribeAll();
 		await pool.end();
 	}
 });

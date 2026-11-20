@@ -45,6 +45,8 @@ cron imports no SQLite library. Today a driver whose dialect is not `pg` is refu
 
 Still to do:
 
+- `toDriver` (`src/cron/utils/driver.ts`) hands everything to sqlkit's `toPgDriver`, which
+  refuses another dialect: a SQLite `Driver` has to be told apart first (sqlkit's `isDriver`);
 - the schema per dialect: `SERIAL`, `JSONB`, `TIMESTAMPTZ`, `gen_random_uuid()`, the
   `DO $$` blocks and the advisory lock are all Postgres;
 - time: `NOW()`, the interval arithmetic and `EXTRACT(EPOCH …)`;

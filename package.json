@@ -14,7 +14,7 @@
   "exports": {
     ".": {
       "types": "./dist/mod.d.ts",
-      "import": "./dist/mod.js"
+      "default": "./dist/mod.js"
     }
   },
   "files": [

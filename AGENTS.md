@@ -43,8 +43,9 @@ src/
     utils/
       sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ (test timer hygiene) + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
-      driver.ts           — CronDb (pg.Pool | pg.Client | sqlkit Driver), toDriver() (one cached driver
-                            per pool/client, refuses a non-pg dialect), isDriver(), isPool()
+      driver.ts           — CronDb (sqlkit's PgDb: pg.Pool | pg.Client | sqlkit Driver), toDriver():
+                            refuses a missing db, otherwise sqlkit's toPgDriver (one driver per
+                            pool/client, refuses a non-pg dialect or an incomplete Driver)
       unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
       with-db-retry.ts    — withDbRetry() + DbRetryOptions on sqlkit's withRetry: retries what classifyPg
                             calls retryable, or exactly a caller's retryableErrors
@@ -57,8 +58,11 @@ tests/
   cron-db.test.ts         — 34 integration tests (requires DB, includes tenant_id scoping + legacy migration
                             + eight concurrent initializers on fresh tables)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
-  driver.test.ts          — 5 tests: a host's sqlkit Driver as `db`, non-pg dialect and missing db refused,
-                            one driver (one pool `error` listener) per pool, CronDb exported
+  driver.test.ts          — 6 tests: a host's sqlkit Driver as `db`, non-pg dialect and missing db refused,
+                            one driver (one pool `error` listener) per pool, shared with toPgDriver's
+                            other callers, CronDb exported
+  package.test.ts         — 2 tests: the export map (`types` first, `default` present) and src/mod.ts
+                            loading with require() as with import (no top-level await in the graph)
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
                             shutdown during backoff, bookkeeping vs handler errors, processors on one pg.Client,
                             heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
@@ -127,14 +131,14 @@ The driver checks the `COMMIT` (a transaction a failed statement aborted rejects
   - A JSON column takes `json(value)` (`json(null)` binds SQL `NULL`), except the run result, which `_logRunSuccess` serializes itself and binds as the string it is.
   - Minutes stay `(${n} * INTERVAL '1 minute')`: a fraction of a minute is valid input.
 - Type a row read: `db.query<CronJob>(…)`. `rowCount` is always a number.
-- Never call the driver's `close()`: it ends the host's pool or client. `toDriver` caches one driver per pool/client object (a `WeakMap`) because building one adds an `error` listener to the pool; a host's own `Driver` is used as it is.
+- Never call the driver's `close()`: it ends the host's pool or client. `toDriver` hands the pool or client to sqlkit's `toPgDriver`, which keeps one driver per object (a `WeakMap` inside sqlkit) because building one adds an `error` listener; a host's own `Driver` is used as it is. Do not build a driver in cron with `createPgDriver` / `createPgClientDriver`: it would be a second one over the host's pool.
 
 **A host's shared `Driver`** (the README and `API.md` `CronDb` say the same to consumers):
 
 - It carries the host's transactions: a `cron.register()` inside the host's `db.transaction()` joins it, and the job exists only if the host commits.
 - `#initializeOnce` runs once per instance, on first use. Inside a host transaction that rolls back, on a database with no cron tables yet, the schema goes with it and the instance does not check again: the first cron call and `start()` belong outside any transaction.
 - `dbRetry` cannot help inside a host transaction: after a failure Postgres has aborted it.
-- Two drivers on one pool each count the other's `error` listener as the host's, so neither reports a dropped idle connection: a host sharing a pool between cron and another sqlkit-based library builds one `Driver` for both.
+- Two drivers on one pool each count the other's `error` listener as the host's, so neither reports a dropped idle connection. Callers of `toPgDriver` on the same copy of sqlkit share one driver; anything else that builds one over the pool (the host's `createPgDriver(pool)`, a library on another sqlkit copy) is a second. So a host sharing a pool between cron and another sqlkit-based library builds one `Driver` for both.
 
 Currently used in:
 
@@ -244,6 +248,10 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
    spaces. `pnpm run format` before committing.
 4. **Never run a script named `publish`** (npm lifecycle hook); publishing is `pnpm publish`,
    via `rp` / `rpm`.
+5. **Loadable with `require()`** — the export map names the file under `default` (the
+   condition `import` and `require()` both match), and nothing in `src/` awaits at its top
+   level, which `require()` refuses anywhere in the module graph. `tests/package.test.ts`
+   holds both.
 
 ---
 
@@ -400,5 +408,5 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 98 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 101 tests); `pnpm run format` before committing
 - [ ] DB integration tests require `TEST_PG_*` env vars

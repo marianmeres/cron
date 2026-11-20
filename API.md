@@ -469,7 +469,7 @@ console.log("Stale handlers removed:", removedHandlers);
   - `kind` — the class as a string (`"connection"`, `"deadlock"`, …)
   - `retryable` — whether `dbRetry` retries it by default
   - `cause` — node-postgres's error, untouched: read `detail`, `severity` or `where` there
-- **A programming mistake** is a `TypeError`, never wrapped: a missing `db` or a driver whose dialect is not `pg`, and a `dbHealthCheck` option out of range (all from the constructor); a `dbRetry` option out of range (at the first call it wraps, see [`DbRetryOptions`](#dbretryoptions)).
+- **A programming mistake** is a `TypeError`, never wrapped: a missing `db`, a driver whose dialect is not `pg` or that lacks a member of sqlkit's `Driver` (one built by a sqlkit older than 0.3), and a `dbHealthCheck` option out of range (all from the constructor); a `dbRetry` option out of range (at the first call it wraps, see [`DbRetryOptions`](#dbretryoptions)).
 - **What a handler throws** is not a database error: it fails the attempt and is recorded in the run log.
 
 ```typescript
@@ -644,13 +644,13 @@ interface CronStopOptions {
 type CronDb = PgPoolLike | PgStandaloneClientLike | Driver;
 ```
 
-What `CronOptions.db` and `Cron.migrate()` take. `PgPoolLike` and `PgStandaloneClientLike` are sqlkit's structural types (`@marianmeres/sqlkit/pg`): a `pg.Pool` and a connected `pg.Client` fit them as they are, so cron imports nothing from `pg`. `Driver` is a sqlkit driver; its `dialect` must be `"pg"`, as with `createPgDriver(pool)` or `createPgClientDriver(client)`.
+What `CronOptions.db` and `Cron.migrate()` take, the same type as sqlkit's `PgDb`. `PgPoolLike` and `PgStandaloneClientLike` are sqlkit's structural types (`@marianmeres/sqlkit/pg`): a `pg.Pool` and a connected `pg.Client` fit them as they are, so cron imports nothing from `pg`. `Driver` is a sqlkit driver; its `dialect` must be `"pg"`, as with `createPgDriver(pool)` or `createPgClientDriver(client)`.
 
-- cron builds one driver per pool or client object and reuses it, however many `Cron` instances, `checkDbHealth()` or `Cron.migrate()` calls share that object. A `Driver` is used as it is.
+- cron turns a pool or client into a driver with sqlkit's `toPgDriver(db)`, which builds one per object and hands it to every later caller: however many `Cron` instances, `checkDbHealth()` or `Cron.migrate()` calls share that object, and any other code that calls `toPgDriver` on it with the same copy of sqlkit. A `Driver` is used as it is.
 - cron never closes what it is given: no `end()`, no `close()`.
 - A shared `Driver` carries your transactions. A `cron.register()` called inside your `driver.transaction()` is part of it, and the job exists only if you commit. `dbRetry` cannot help there: after a failure Postgres has aborted the transaction.
 - Make an instance's first call, and `start()`, outside any transaction of yours. On a database with no cron tables yet, a schema check inside a transaction that rolls back is rolled back with it, and the instance does not check again.
-- When cron and another sqlkit-based library use the same pool, build one `Driver` and pass it to both. Two drivers on one pool each take the other's `error` listener for the host's, so neither reports a dropped idle connection.
+- When cron and another sqlkit-based library use the same pool, build one `Driver` and pass it to both. A driver built over the pool other than by that `toPgDriver` (your `createPgDriver(pool)`, a library on another copy of sqlkit) is a second one, and two drivers on one pool each take the other's `error` listener for the host's, so neither reports a dropped idle connection.
 
 ```typescript
 import pg from "pg";
