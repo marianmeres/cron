@@ -6,11 +6,10 @@
   PostgreSQL (pg v8)
 - **Install**: `pnpm install` | **Test**: `pnpm test` (one file: `node --test --env-file-if-exists=.env tests/cron-db.test.ts`)
   | **Check all**: `pnpm run ci` (typecheck + lint + test)
-- **Deno suite**: `pnpm run test:deno` | **JSR dry run**: `pnpm run jsr:check`
 - **Build npm**: `pnpm run build` (`tsc` → `dist/`) | **Release + publish**: `pnpm run rp` / `rpm`
   (human action)
-- **Registries**: npm gets `dist/` (manifest `package.json`, the version of record); JSR gets
-  the `.ts` source (manifest `jsr.json`, no version).
+- **Registry**: npm only; it gets `dist/` (manifest `package.json`). 3.3.0 is the last version
+  on JSR.
 - **Entry**: `src/mod.ts` → `src/cron.ts` → `src/cron/cron.ts` (includes `CronTenantScope` interface)
 
 ---
@@ -43,7 +42,7 @@ src/
       sleep.ts            — sleep(ms, ref?, signal?) with __timeout_ref__ (test timer hygiene) + AbortSignal
       with-timeout.ts     — TimeoutError + withTimeout<T>(fn, ms, msg, abortController?)
       with-tx.ts          — withTx(db, async (client) => …) — works on Pool AND Client; exports isPool()
-      unref-timer.ts      — unrefTimer(): Node's .unref(), or Deno.unrefTimer() for JSR consumers on Deno
+      unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
       with-db-retry.ts    — withDbRetry() with exponential backoff
       db-health.ts        — DbHealthMonitor, checkDbHealth()
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
@@ -61,7 +60,6 @@ tests/
                             getRunHistory filters and pages, unregister cascade, checkDbHealth / getDbHealth
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
-jsr.json                  — JSR manifest: exports, jsr:/npm: import map, publish.include
 tsconfig.json             — type gate (src + tests, noEmit)
 tsconfig.build.json       — src → dist (ESM + .d.ts) for npm
 ```
@@ -206,22 +204,16 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 
 ## Tooling Conventions
 
-1. **Runtime policy** — Node at the keyboard, npm as the registry of record, JSR kept for
-   Deno consumers. No `Bun.*`, `jsr:` or `npm:` specifiers in `src/` or `tests/`; the one
-   `Deno.*` reference is the feature-detected `Deno.unrefTimer` in `unref-timer.ts`.
+1. **Runtime policy** — Node at the keyboard, npm the only registry. No `Deno.*`, `Bun.*`,
+   `jsr:` or `npm:` specifiers in `src/` or `tests/`.
 2. **Erasable TypeScript** — no `enum`, `namespace`, constructor parameter properties;
    `import type` for types; explicit `.ts` import extensions (rewritten to `.js` on emit).
    Node strips types and never checks them: `pnpm run typecheck` is the only type gate.
    `noUncheckedIndexedAccess` is off (Deno never had it, and the move off Deno changed no code).
 3. **Formatting** — tabs, 4 wide, 90 columns, double quotes (`biome.json`); manifests at 2
    spaces. `pnpm run format` before committing.
-4. **JSR** — `deno publish` rewrites bare specifiers through `jsr.json`'s `imports`: the four
-   `@marianmeres/*` deps go to `jsr:` (the copies Deno consumers already use) and `pg` to
-   `npm:`. Keep each range equal in `package.json` and `jsr.json`. The version comes from
-   `--set-version`. `test:deno` runs the suite against `jsr.json` with `--no-check` (Deno's
-   checker trips over `@types/node` in `node_modules`); `jsr:check` keeps Deno's type check.
-5. **Never run a script named `publish`** (npm lifecycle hook); publishing is `publish:all` /
-   `publish:jsr`, via `rp` / `rpm`.
+4. **Never run a script named `publish`** (npm lifecycle hook); publishing is `pnpm publish`,
+   via `rp` / `rpm`.
 
 ---
 
@@ -317,7 +309,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 
 ### Avoiding leaked timers in tests with abandoned handlers
 
-When a test deliberately stops the cron _before_ an in-flight handler returns (e.g. testing `drainTimeoutMs`), Deno's leak detector (`pnpm run test:deno`) will flag the still-running setTimeout from the handler, and under `node --test` the timer keeps the file's process alive until it fires. Patterns:
+When a test deliberately stops the cron _before_ an in-flight handler returns (e.g. testing `drainTimeoutMs`), the handler's still-running setTimeout keeps the file's process alive under `node --test` until it fires. Patterns:
 
 1. Pass a `__timeout_ref__` ref into the handler's `sleep(ms, ref)` so the test can `clearTimeout(ref.id)` before exiting.
 2. Wait long enough at the end of the test for the abandoned timer to fire naturally (e.g. handler sleep 700ms, test trailing sleep 800ms).
@@ -372,5 +364,4 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
 - [ ] Run `pnpm run ci` after changes (typecheck + lint + 86 tests); `pnpm run format` before committing
-- [ ] Before a JSR publish: `pnpm run test:deno` and `pnpm run jsr:check`
 - [ ] DB integration tests require `TEST_PG_*` env vars

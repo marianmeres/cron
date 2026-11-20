@@ -1,7 +1,6 @@
 # @marianmeres/cron
 
 [![NPM](https://img.shields.io/npm/v/@marianmeres/cron)](https://www.npmjs.com/package/@marianmeres/cron)
-[![JSR](https://jsr.io/badges/@marianmeres/cron)](https://jsr.io/@marianmeres/cron)
 [![License](https://img.shields.io/npm/l/@marianmeres/cron)](LICENSE)
 
 PostgreSQL-backed recurring cron job scheduler. Concurrent workers via
@@ -18,9 +17,7 @@ isolation, and an optional task registry for UI-driven job management.
 npm install @marianmeres/cron
 ```
 
-```bash
-deno add jsr:@marianmeres/cron
-```
+The package is published to npm only. Version 3.3.0 is the last one on JSR.
 
 ## Usage
 
@@ -243,9 +240,9 @@ so the same task type definitions can serve multiple tenants, each with its own
 schedules and payloads, while sharing one processor pool.
 
 > **Note:** `paramsSchema` validation compiles the schema with AJV, via
-> `@marianmeres/modelize`'s `/ajv` subpath. Under Deno/JSR both resolve
-> automatically. On npm, `ajv` is an **optional peer dependency** — npm does not
-> install it for you, so run `npm install ajv` if you use `paramsSchema`.
+> `@marianmeres/modelize`'s `/ajv` subpath. `ajv` is an **optional peer
+> dependency** — npm does not install it for you, so run `npm install ajv` if you
+> use `paramsSchema`.
 
 ### Cron expression format
 
@@ -361,21 +358,19 @@ See [API.md](API.md) for full API reference.
 ## Development
 
 Node LTS (`.node-version`), pnpm, Biome, `node:test`. The source is erasable-only
-TypeScript that Node runs directly; `dist/` is built only for publishing to npm. JSR is
-served the `.ts` source (`jsr.json`). The tests need a PostgreSQL database: copy
-`.env.example` to `.env` and set the `TEST_PG_*` credentials.
+TypeScript that Node runs directly; `dist/` is built only for publishing to npm. The
+tests need a PostgreSQL database: copy `.env.example` to `.env` and set the `TEST_PG_*`
+credentials.
 
 | Command                             | Does                                                        |
 | ----------------------------------- | ----------------------------------------------------------- |
 | `pnpm install`                      | installs the deps and the dev tooling                       |
 | `pnpm test` / `pnpm run test:watch` | `node --test` over `tests/**/*.test.ts`, one file at a time |
-| `pnpm run test:deno`                | the same suite on Deno, resolved as JSR consumers see it    |
 | `pnpm run typecheck`                | `tsc --noEmit` over `src` and `tests`                       |
 | `pnpm run lint` / `pnpm run format` | `biome check .` read-only / with `--write`                  |
 | `pnpm run ci`                       | typecheck + lint + test, what CI runs                       |
 | `pnpm run build`                    | `tsc -p tsconfig.build.json` → `dist/`                      |
-| `pnpm run jsr:check`                | `deno publish --dry-run` with the `package.json` version    |
-| `pnpm run rp` / `pnpm run rpm`      | patch / minor release, then publish to npm and JSR          |
+| `pnpm run rp` / `pnpm run rpm`      | patch / minor release, then publish to npm                  |
 
 ## License
 

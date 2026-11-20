@@ -55,15 +55,11 @@
     "format": "biome check --write .",
     "test": "node --test --test-concurrency=1 --env-file-if-exists=.env \"tests/**/*.test.ts\"",
     "test:watch": "node --test --test-concurrency=1 --watch --env-file-if-exists=.env \"tests/**/*.test.ts\"",
-    "test:deno": "deno test -A --no-check --no-lock --config jsr.json --env-file=.env tests/",
-    "jsr:check": "deno publish --dry-run --allow-dirty --set-version \"$npm_package_version\"",
     "ci": "pnpm run typecheck && pnpm run lint && pnpm test",
     "prepublishOnly": "pnpm run ci && pnpm run build",
     "release": "npx --yes @marianmeres/release@^2.2.0",
-    "publish:jsr": "pnpm run test:deno && deno publish --set-version \"$npm_package_version\"",
-    "publish:all": "pnpm publish && pnpm run publish:jsr",
-    "rp": "pnpm run release -y && pnpm run publish:all",
-    "rpm": "pnpm run release minor -y && pnpm run publish:all"
+    "rp": "pnpm run release -y && pnpm publish",
+    "rpm": "pnpm run release minor -y && pnpm publish"
   },
   "dependencies": {
     "@marianmeres/clog": "^3.23.0",

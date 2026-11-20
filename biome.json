@@ -43,7 +43,7 @@
 	},
 	"overrides": [
 		{
-			"includes": ["**/package.json", "**/deno.json", "**/jsr.json"],
+			"includes": ["**/package.json"],
 			"json": {
 				"formatter": {
 					"indentStyle": "space",

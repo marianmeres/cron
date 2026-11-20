@@ -386,7 +386,7 @@ const tasks = registry.list();
 
 Validates a payload against the task type's `paramsSchema` — the JSON Schema is compiled by AJV, via `@marianmeres/modelize`'s `/ajv` subpath. Returns `{ valid: true, errors: [] }` if no schema is defined.
 
-Throws if the task type is unknown, or if `@marianmeres/modelize` / `ajv` cannot be imported. Under Deno/JSR both resolve automatically; on npm, `ajv` is an optional peer dependency and has to be installed explicitly.
+Throws if the task type is unknown, or if `@marianmeres/modelize` / `ajv` cannot be imported. `ajv` is an optional peer dependency and has to be installed explicitly.
 
 ```typescript
 const result = await registry.validate("send-report", {
