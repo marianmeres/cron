@@ -1,6 +1,6 @@
 {
   "name": "@marianmeres/cron",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "description": "PostgreSQL-backed recurring cron job scheduler: concurrent workers (FOR UPDATE SKIP LOCKED), drift-safe scheduling, lease tokens with heartbeat, retries with capped backoff, timeouts with AbortSignal, IANA timezones, tenant scoping and a task registry.",
   "license": "MIT",
   "author": "Marian Meres",
