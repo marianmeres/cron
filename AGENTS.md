@@ -69,6 +69,7 @@ tests/
                             TypeError for an option out of range, dbRetry around the claim; a health check
                             timing out, a monitor's flips, dbHealthCheck.timeoutMs
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
+docs/backlog.md           — open work after 4.0.0 (ranked, not scheduled): PGlite, migrations, SQLite
 package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
 tsconfig.json             — type gate (src + tests, noEmit)
 tsconfig.build.json       — src → dist (ESM + .d.ts) for npm
