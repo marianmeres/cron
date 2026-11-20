@@ -1194,3 +1194,46 @@ test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 		await db.end();
 	}
 });
+
+// -------------------------------------------------------------------------
+
+// Regression: N replicas booting at once on a database that has no cron tables
+// yet. Without the advisory lock in `_initialize`, concurrent
+// `CREATE TABLE IF NOT EXISTS` collide inside Postgres's catalog (23505 on
+// `pg_type_typname_nsp_index`) and all but one initializer fail.
+test("34 schema-init-concurrent-initializers-on-fresh-tables", async () => {
+	const db = createPg();
+	const PREFIX = "_test_initlock_"; // a prefix no other test uses
+	const createLockCron = () =>
+		new Cron({
+			db,
+			tablePrefix: PREFIX,
+			pollTimeoutMs: POLL,
+			gracefulSigterm: false,
+			logger: noopLogger,
+		});
+	const first = createLockCron();
+	const crons = [first, ...Array.from({ length: 7 }, createLockCron)];
+
+	try {
+		// Fresh tables: nothing exists before the eight first calls.
+		await db.query(
+			`DROP TABLE IF EXISTS ${PREFIX}__cron_run_log; DROP TABLE IF EXISTS ${PREFIX}__cron;`,
+		);
+
+		// Each instance's first call initializes the schema; all at once.
+		const results = await Promise.allSettled(crons.map((c) => c.fetchAll()));
+		const failed = results.filter((r) => r.status === "rejected");
+		assert.deepStrictEqual(
+			failed.map((r) => String((r as PromiseRejectedResult).reason)),
+			[],
+			"every concurrent initializer must resolve",
+		);
+		for (const r of results) {
+			assert.deepStrictEqual((r as PromiseFulfilledResult<CronJob[]>).value, []);
+		}
+	} finally {
+		await first.uninstall();
+		await db.end();
+	}
+});

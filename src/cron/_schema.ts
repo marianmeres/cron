@@ -92,6 +92,12 @@ export async function _initialize(context: CronContext, hard = false): Promise<v
 		.join("\n");
 
 	await withTx(context.db, async (client) => {
+		// Serialize concurrent initializers (N replicas booting on a fresh database): two
+		// CREATE TABLE IF NOT EXISTS at once collide in pg_type. Transaction-scoped, so it
+		// is released by COMMIT or ROLLBACK.
+		await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+			`cron:${context.tableNames.tableCron}`,
+		]);
 		await client.query(sql);
 	});
 }

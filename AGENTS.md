@@ -50,7 +50,8 @@ src/
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
   _time.ts                — clearOfMinuteBoundary(): waits a near minute boundary out before a test
-  cron-db.test.ts         — 33 integration tests (requires DB, includes tenant_id scoping + legacy migration)
+  cron-db.test.ts         — 34 integration tests (requires DB, includes tenant_id scoping + legacy migration
+                            + eight concurrent initializers on fresh tables)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
                             shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
@@ -276,6 +277,10 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 - `(started_at DESC)` — history queries
 - `(tenant_id)` — per-tenant log queries
 
+### Schema creation lock
+
+`_initialize` (boot-time `CREATE … IF NOT EXISTS`, and `resetHard()`'s drop + create) takes `pg_advisory_xact_lock(hashtext('cron:<tableCron>'))` as the first statement of its transaction. Without it, concurrent initializers on a fresh database (N replicas booting at once) collide in `pg_type` with `23505` and all but one fail. Transaction-scoped: released by `COMMIT` / `ROLLBACK`. `_uninstall` takes no lock.
+
 ### Migration
 
 `Cron.migrate(db, tablePrefix?)` is the single migration entry point. Runs in a real transaction (works on Pool). Idempotent. Currently bundles:
@@ -366,6 +371,6 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 85 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 86 tests); `pnpm run format` before committing
 - [ ] Before a JSR publish: `pnpm run test:deno` and `pnpm run jsr:check`
 - [ ] DB integration tests require `TEST_PG_*` env vars
