@@ -9,16 +9,31 @@
  * - an option out of range is a `TypeError` at the call, before anything runs
  * - `dbRetry` covers the claim: checkouts refused before `start()` do not cost the run
  *
- * The last test requires a live PostgreSQL database (TEST_PG_*) just like
- * cron-db.test.ts; the others need none.
+ * And how a health check ends, on sqlkit's `checkHealth` and `createHealthMonitor`:
+ *
+ * - a check that never answers is unhealthy at `timeoutMs`, `latencyMs` `null`
+ * - a monitor calls `onUnhealthy` on the flip down and `onHealthy` on the flip back, once
+ *   each, and no longer warns on every failed check
+ * - `dbHealthCheck.timeoutMs` reaches the monitor `start()` runs
+ *
+ * The `dbRetry` test requires a live PostgreSQL database (TEST_PG_*) just like
+ * cron-db.test.ts; the others need none (the health tests run on a stub `Driver`).
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Logger } from "@marianmeres/clog";
+import type { Driver, Sql } from "@marianmeres/sqlkit";
 import type pg from "pg";
+import { checkDbHealth, DbHealthMonitor } from "../src/cron/utils/db-health.ts";
 import { withDbRetry } from "../src/cron/utils/with-db-retry.ts";
-import { Cron, type CronJob, type DbRetryOptions, RUN_STATUS } from "../src/mod.ts";
+import {
+	Cron,
+	type CronJob,
+	type DbHealthStatus,
+	type DbRetryOptions,
+	RUN_STATUS,
+} from "../src/mod.ts";
 import { createPg } from "./_pg.ts";
 
 const TABLE_PREFIX = "_test_";
@@ -189,5 +204,126 @@ test("retry: dbRetry covers the claim", async () => {
 		assert.deepStrictEqual(rows, [{ status: RUN_STATUS.SUCCESS }]);
 	} finally {
 		await db.end();
+	}
+});
+
+// -------------------------------------------------------------------------
+
+/**
+ * Shaped like a pg `Driver`, never reaching a database: every statement goes to
+ * `query(text)` (a fragment as its chunks joined by `?`), a script resolves, a
+ * transaction calls its callback with the stub.
+ */
+function pgStub(query: (text: string) => Promise<unknown>): Driver {
+	const stub = {
+		dialect: "pg",
+		adapter: "stub",
+		capabilities: { sync: false, concurrentWriters: true, crossProcessLock: true },
+		query: (statement: string | Sql) =>
+			query(typeof statement === "string" ? statement : statement.chunks.join("?")),
+		exec: async () => {},
+		transaction: async (fn: (tx: Driver) => Promise<unknown>) => await fn(stub),
+		exclusive: async (_name: string, fn: (tx: Driver) => Promise<unknown>) =>
+			await fn(stub),
+		close: async () => {},
+	} as unknown as Driver;
+	return stub;
+}
+
+/** Whether `text` is the health check's own statement (sqlkit sends `select 1`). */
+const isHealthCheck = (text: string) => /^\s*select 1\s*$/i.test(text);
+
+/** A promise that never settles: a database that hangs rather than refuses. */
+const never = () => new Promise<never>(() => {});
+
+test("health: a check that never answers is unhealthy at timeoutMs", async () => {
+	const stub = pgStub(() => never());
+	const started = Date.now();
+	const status: DbHealthStatus = await checkDbHealth(stub, undefined, {
+		timeoutMs: 50,
+	});
+	assert.deepStrictEqual(status.healthy, false);
+	assert.deepStrictEqual(status.latencyMs, null);
+	assert.match(status.error ?? "", /timed out/);
+	assert.deepStrictEqual(status.pgVersion, undefined);
+	assert.ok(status.timestamp instanceof Date, "timestamp is a Date");
+	assert.ok(Date.now() - started < 2_000, "answered at the timeout, not later");
+});
+
+test("health: a monitor reports the flip down and the flip back, once each", async () => {
+	let checks = 0;
+	const stub = pgStub(async (text) => {
+		if (isHealthCheck(text) && ++checks <= 2) {
+			throw driverError("connect ECONNREFUSED 127.0.0.1:5432", "ECONNREFUSED");
+		}
+		return { rows: [], rowCount: 0 };
+	});
+	const { logger, lines } = recordingLogger();
+	const unhealthy: DbHealthStatus[] = [];
+	const healthy: DbHealthStatus[] = [];
+	let recovered: () => void = () => {};
+	const recovery = new Promise<void>((resolve) => {
+		recovered = resolve;
+	});
+	const monitor = new DbHealthMonitor(stub, {
+		intervalMs: 10,
+		logger,
+		onUnhealthy: (status) => void unhealthy.push(status),
+		onHealthy: (status) => {
+			healthy.push(status);
+			recovered();
+		},
+	});
+	const timer = setTimeout(() => recovered(), 2_000);
+	try {
+		await monitor.start();
+		assert.deepStrictEqual(monitor.getLastStatus()?.healthy, false);
+		await recovery;
+		// a few more healthy checks: none of them is a flip
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} finally {
+		clearTimeout(timer);
+		monitor.stop();
+	}
+
+	assert.deepStrictEqual(unhealthy.length, 1, "onUnhealthy once");
+	assert.deepStrictEqual(healthy.length, 1, "onHealthy once");
+	assert.deepStrictEqual(unhealthy[0].healthy, false);
+	assert.deepStrictEqual(unhealthy[0].latencyMs, null);
+	assert.match(unhealthy[0].error ?? "", /ECONNREFUSED/);
+	assert.deepStrictEqual(healthy[0].healthy, true);
+	assert.deepStrictEqual(healthy[0].error, null);
+	assert.ok(checks > 3, `the monitor went on checking: ${checks} checks`);
+	assert.deepStrictEqual(monitor.getLastStatus()?.healthy, true);
+	assert.ok(
+		lines.error.includes("Database became unhealthy"),
+		JSON.stringify(lines.error),
+	);
+	assert.ok(lines.debug.includes("Database recovered"), JSON.stringify(lines.debug));
+	assert.deepStrictEqual(lines.warn, [], "no warning on every failed check");
+});
+
+test("health: dbHealthCheck.timeoutMs reaches the monitor start() runs", async () => {
+	// Answers everything start() asks for the schema, never the health check
+	const stub = pgStub((text) =>
+		isHealthCheck(text) ? never() : Promise.resolve({ rows: [], rowCount: 0 }),
+	);
+	const { logger } = recordingLogger();
+	const cron = new Cron({
+		db: stub,
+		tablePrefix: TABLE_PREFIX,
+		gracefulSigterm: false,
+		logger,
+		dbHealthCheck: { timeoutMs: 50, intervalMs: 20 },
+	});
+	try {
+		assert.deepStrictEqual(cron.getDbHealth(), null, "null before start()");
+		await cron.start(0);
+		const status = cron.getDbHealth();
+		assert.deepStrictEqual(status?.healthy, false, JSON.stringify(status));
+		assert.deepStrictEqual(status?.latencyMs, null);
+		assert.match(status?.error ?? "", /timed out after 50 ms/);
+	} finally {
+		await cron.stop();
 	}
 });

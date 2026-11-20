@@ -1,12 +1,20 @@
 /**
  * @module db-health
  *
- * Provides database health checking and monitoring utilities.
- * Includes one-time health checks and periodic monitoring with
- * state change callbacks.
+ * Provides database health checking and monitoring utilities, on sqlkit's
+ * `checkHealth` and `createHealthMonitor`: a check is one `select 1`, timed, and one
+ * that has not answered within `timeoutMs` (5 s) is unhealthy. Includes one-time
+ * health checks and periodic monitoring with state change callbacks.
  */
 
 import type { Logger } from "@marianmeres/clog";
+import {
+	checkHealth,
+	createHealthMonitor,
+	type Driver,
+	type HealthMonitor,
+	type HealthStatus,
+} from "@marianmeres/sqlkit";
 import { type CronDb, toDriver } from "./driver.ts";
 
 /**
@@ -17,27 +25,69 @@ export interface DbHealthStatus {
 	healthy: boolean;
 	/** Query latency in milliseconds, or null if check failed */
 	latencyMs: number | null;
-	/** Error message if the check failed */
+	/** Error message if the check failed: the driver's, or the timeout's */
 	error: string | null;
-	/** Timestamp of the health check */
+	/** Timestamp of the health check (when it was sent) */
 	timestamp: Date;
 	/** PostgreSQL version string (if healthy) */
 	pgVersion?: string;
 }
 
+/** The server version of each driver, once it answered; asked once per driver. */
+const versions = new WeakMap<Driver, string>();
+
+/**
+ * The server version (`18.6`): asked once per driver, after a healthy check, and
+ * remembered once it answered. Never rejects: a version it could not get is `undefined`,
+ * and the next healthy check asks again.
+ */
+async function versionOf(driver: Driver): Promise<string | undefined> {
+	const known = versions.get(driver);
+	if (known !== undefined) return known;
+	try {
+		const result = await driver.query<{ version?: string | null }>(
+			"SELECT version()",
+		);
+		// "PostgreSQL 18.6 on x86_64-pc-linux-gnu, …"
+		const version = result.rows[0]?.version?.split(" ")[1];
+		if (version) versions.set(driver, version);
+		return version;
+	} catch {
+		return undefined;
+	}
+}
+
+/** sqlkit's status, as cron has always reported it. */
+function toStatus(s: HealthStatus, pgVersion?: string): DbHealthStatus {
+	return {
+		healthy: s.healthy,
+		latencyMs: s.latencyMs,
+		error: s.error?.message ?? null,
+		timestamp: s.checkedAt,
+		...(pgVersion ? { pgVersion } : {}),
+	};
+}
+
 /**
  * Performs a one-time health check against the database.
  *
- * Executes a simple query to verify connectivity and measure latency.
- * Also retrieves the PostgreSQL version.
+ * Executes a simple query to verify connectivity and measure latency, raced against
+ * `timeoutMs`: a check that has not answered by then is unhealthy (its query is
+ * abandoned, not cancelled). After a healthy check it also reports the PostgreSQL
+ * version, asked once per driver.
  *
  * @param db - A `pg.Pool`, a `pg.Client` or a sqlkit `Driver`
  * @param logger - Optional logger for error reporting
- * @returns Health status with connectivity, latency, and version info
+ * @param options - `timeoutMs`: milliseconds after which a check that has not answered
+ *   is unhealthy, above 0 (default: 5000)
+ * @returns Health status with connectivity, latency, and version info; never rejects
+ *   for a database that is down
+ * @throws {TypeError} (as a rejection) If `db` is not a database, or an option is of
+ *   the wrong type or out of range
  *
  * @example
  * ```typescript
- * const status = await checkDbHealth(pool);
+ * const status = await checkDbHealth(pool, logger, { timeoutMs: 2000 });
  * if (!status.healthy) {
  *   console.error(`DB error: ${status.error}`);
  * }
@@ -46,43 +96,21 @@ export interface DbHealthStatus {
 export async function checkDbHealth(
 	db: CronDb,
 	logger?: Logger,
+	options: { timeoutMs?: number } = {},
 ): Promise<DbHealthStatus> {
-	const start = Date.now();
-	const timestamp = new Date();
-
-	try {
-		// Simple query to test connection
-		const result = await toDriver(db).query<{ version: string }>(
-			"SELECT version(), NOW() as now",
-		);
-		const latencyMs = Date.now() - start;
-
-		return {
-			healthy: true,
-			latencyMs,
-			error: null,
-			timestamp,
-			pgVersion: result.rows[0]?.version?.split(" ")[1], // Extract version number
-		};
-	} catch (error: unknown) {
-		const latencyMs = Date.now() - start;
-		const errMsg = error instanceof Error ? error.message : String(error);
-		logger?.error?.(`DB health check failed: ${errMsg}`);
-
-		return {
-			healthy: false,
-			latencyMs,
-			error: errMsg,
-			timestamp,
-		};
-	}
+	const driver = toDriver(db);
+	const s = await checkHealth(driver, options);
+	if (!s.healthy) logger?.error?.(`DB health check failed: ${s.error?.message}`);
+	return toStatus(s, s.healthy ? await versionOf(driver) : undefined);
 }
 
 /**
  * Periodic database health monitor with state change callbacks.
  *
  * Continuously monitors database health and triggers callbacks when
- * the database transitions between healthy and unhealthy states.
+ * the database transitions between healthy and unhealthy states. The next check
+ * starts `intervalMs` after the previous one answered or timed out, and its timers
+ * never keep a process alive.
  *
  * @example
  * ```typescript
@@ -98,26 +126,24 @@ export async function checkDbHealth(
  * ```
  */
 export class DbHealthMonitor {
-	#db: CronDb;
-	#logger?: Logger;
-	#intervalMs: number;
-	#timeoutId: ReturnType<typeof setTimeout> | null = null;
-	#isRunning = false;
-	#lastStatus: DbHealthStatus | null = null;
-	#onUnhealthy?: (status: DbHealthStatus) => void;
-	#onHealthy?: (status: DbHealthStatus) => void;
+	#driver: Driver;
+	#monitor: HealthMonitor;
 
 	/**
 	 * Creates a new DbHealthMonitor instance.
 	 *
 	 * @param db - A `pg.Pool`, a `pg.Client` or a sqlkit `Driver`
 	 * @param options - Monitor configuration options
+	 * @throws {TypeError} If `db` is not a database, or an option is of the wrong type
+	 *   or out of range
 	 */
 	constructor(
 		db: CronDb,
 		options: {
-			/** Check interval in milliseconds (default: 30000) */
+			/** Check interval in milliseconds, above 0 (default: 30000; 0 also means the default) */
 			intervalMs?: number;
+			/** Milliseconds after which a check that has not answered is unhealthy, above 0 (default: 5000) */
+			timeoutMs?: number;
 			/** Logger for status messages */
 			logger?: Logger;
 			/** Callback when database becomes unhealthy */
@@ -126,11 +152,27 @@ export class DbHealthMonitor {
 			onHealthy?: (status: DbHealthStatus) => void;
 		} = {},
 	) {
-		this.#db = db;
-		this.#logger = options.logger;
-		this.#intervalMs = options.intervalMs || 30_000;
-		this.#onUnhealthy = options.onUnhealthy;
-		this.#onHealthy = options.onHealthy;
+		const { logger, onUnhealthy, onHealthy } = options;
+		const driver = toDriver(db);
+		this.#driver = driver;
+		this.#monitor = createHealthMonitor(driver, {
+			intervalMs: options.intervalMs || 30_000,
+			timeoutMs: options.timeoutMs,
+			// Called with the first status (`previous` null), then on every flip. As
+			// before, a first check that is healthy is no change.
+			onChange: (status, previous) => {
+				if (!status.healthy) {
+					logger?.error?.(`DB health check failed: ${status.error?.message}`);
+					logger?.error?.("Database became unhealthy");
+					onUnhealthy?.(toStatus(status));
+				} else if (previous !== null) {
+					logger?.debug?.("Database recovered");
+					// known when an earlier check was healthy; asked for the next status if not
+					void versionOf(driver);
+					onHealthy?.(toStatus(status, versions.get(driver)));
+				}
+			},
+		});
 	}
 
 	/**
@@ -142,10 +184,8 @@ export class DbHealthMonitor {
 	 * @returns A Promise that resolves after the first check completes
 	 */
 	async start(): Promise<void> {
-		if (this.#isRunning) return;
-
-		this.#isRunning = true;
-		await this.#scheduleNext();
+		await this.#monitor.start();
+		if (this.#monitor.last()?.healthy) await versionOf(this.#driver);
 	}
 
 	/**
@@ -154,11 +194,7 @@ export class DbHealthMonitor {
 	 * Cancels any pending health checks.
 	 */
 	stop(): void {
-		this.#isRunning = false;
-		if (this.#timeoutId) {
-			clearTimeout(this.#timeoutId);
-			this.#timeoutId = null;
-		}
+		this.#monitor.stop();
 	}
 
 	/**
@@ -167,41 +203,8 @@ export class DbHealthMonitor {
 	 * @returns The last health status, or `null` if no check has been performed
 	 */
 	getLastStatus(): DbHealthStatus | null {
-		return this.#lastStatus;
-	}
-
-	async #scheduleNext(): Promise<void> {
-		if (!this.#isRunning) return;
-
-		// Perform the check
-		await this.#check();
-
-		// Schedule next check (only if still running)
-		if (this.#isRunning) {
-			this.#timeoutId = setTimeout(() => this.#scheduleNext(), this.#intervalMs);
-		}
-	}
-
-	async #check(): Promise<void> {
-		const status = await checkDbHealth(this.#db, this.#logger);
-		const wasHealthy = this.#lastStatus?.healthy ?? true;
-
-		this.#lastStatus = status;
-
-		// Trigger callbacks on state changes
-		if (!status.healthy && wasHealthy) {
-			this.#logger?.error?.("Database became unhealthy");
-			this.#onUnhealthy?.(status);
-		} else if (status.healthy && !wasHealthy) {
-			this.#logger?.debug?.("Database recovered");
-			this.#onHealthy?.(status);
-		}
-
-		// Log if unhealthy
-		if (!status.healthy) {
-			this.#logger?.warn?.(
-				`DB health check failed (latency: ${status.latencyMs}ms): ${status.error}`,
-			);
-		}
+		const last = this.#monitor.last();
+		if (last === null) return null;
+		return toStatus(last, last.healthy ? versions.get(this.#driver) : undefined);
 	}
 }

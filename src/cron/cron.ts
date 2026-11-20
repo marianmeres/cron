@@ -21,6 +21,7 @@ import { type CronDb, toDriver } from "./utils/driver.ts";
 import { sleep } from "./utils/sleep.ts";
 import { type DbRetryOptions, withDbRetry } from "./utils/with-db-retry.ts";
 
+export type { DbHealthStatus } from "./utils/db-health.ts";
 export type { CronDb } from "./utils/driver.ts";
 export type { DbRetryOptions } from "./utils/with-db-retry.ts";
 
@@ -231,12 +232,21 @@ export interface CronOptions {
 	 * Covers the claim query and the writes that record a run's outcome.
 	 */
 	dbRetry?: DbRetryOptions | boolean;
-	/** Enable database health monitoring (true = defaults, or provide options) */
+	/**
+	 * Enable database health monitoring (true = defaults, or provide options).
+	 * `start()` runs the first check, `getDbHealth()` reports the latest. An option of
+	 * the wrong type or out of range is a `TypeError` here.
+	 */
 	dbHealthCheck?:
 		| boolean
 		| {
+				/** Health check interval in milliseconds, above 0 (default: 30000; 0 also means the default) */
 				intervalMs?: number;
+				/** Milliseconds after which a check that has not answered is unhealthy, above 0 (default: 5000) */
+				timeoutMs?: number;
+				/** Callback when database becomes unhealthy */
 				onUnhealthy?: (status: DbHealthStatus) => void;
+				/** Callback when database recovers */
 				onHealthy?: (status: DbHealthStatus) => void;
 		  };
 	/**
@@ -1325,7 +1335,10 @@ export class Cron {
 		return this.#healthMonitor?.getLastStatus() ?? null;
 	}
 
-	/** Manually triggers a one-off database health check. */
+	/**
+	 * Manually triggers a one-off database health check. A check that has not answered
+	 * in 5 s is unhealthy; a database that is down resolves unhealthy, never rejects.
+	 */
 	async checkDbHealth(): Promise<DbHealthStatus> {
 		return await checkDbHealth(this.#db, this.#logger);
 	}

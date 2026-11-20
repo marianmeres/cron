@@ -46,7 +46,9 @@ src/
       unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
       with-db-retry.ts    — withDbRetry() + DbRetryOptions on sqlkit's withRetry: retries what classifyPg
                             calls retryable, or exactly a caller's retryableErrors
-      db-health.ts        — DbHealthMonitor, checkDbHealth() (take a CronDb, query via toDriver)
+      db-health.ts        — DbHealthMonitor, checkDbHealth() + DbHealthStatus on sqlkit's checkHealth /
+                            createHealthMonitor: `select 1` raced against timeoutMs (5 s), pgVersion asked
+                            once per driver; logs only on a flip; imports driver.ts only, never cron.ts
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
   _time.ts                — clearOfMinuteBoundary(): waits a near minute boundary out before a test
@@ -61,8 +63,9 @@ tests/
   statements.test.ts      — 10 tests, S1–S8: what statements read and write — payload and result JSON
                             round trips, run-log rows of success / error / timeout, fetchAll and
                             getRunHistory filters and pages, unregister cascade, checkDbHealth / getDbHealth
-  db-resilience.test.ts   — 4 tests: what withDbRetry retries by default and with retryableErrors, a
-                            TypeError for an option out of range, dbRetry around the claim
+  db-resilience.test.ts   — 7 tests: what withDbRetry retries by default and with retryableErrors, a
+                            TypeError for an option out of range, dbRetry around the claim; a health check
+                            timing out, a monitor's flips, dbHealthCheck.timeoutMs
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
 tsconfig.json             — type gate (src + tests, noEmit)
@@ -323,7 +326,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - Test 33: legacy migration with a mixed-case `tablePrefix`, run twice — `colExists()` and `addCheckIfMissing` lower-case identifiers to match Postgres folding (else the rename silently no-ops, or the second call re-adds a CHECK constraint and fails)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
 - `tests/cron-fixes.test.ts`: covers the finalization's transaction (B1: one connection from `begin` to `commit`; a failed run-log write rolls the job row back — `recordCheckouts()` records each checkout's statements), lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
-- `tests/db-resilience.test.ts`: the retry tests call `withDbRetry` directly with driver-shaped errors (`Object.assign(new Error(…), { code })`), no database; the `dbRetry` test arms `failNextCheckouts(db, 2, "ECONNREFUSED")` before `start(1)`, so the refused checkouts are the claim's (the instance is initialized by then)
+- `tests/db-resilience.test.ts`: the retry tests call `withDbRetry` directly with driver-shaped errors (`Object.assign(new Error(…), { code })`), no database; the `dbRetry` test arms `failNextCheckouts(db, 2, "ECONNREFUSED")` before `start(1)`, so the refused checkouts are the claim's (the instance is initialized by then). The health tests run on `pgStub(query)`, a stub pg `Driver` whose `query` gets each statement's text (a fragment's chunks joined by `?`); a `select 1` that never settles is a database that hangs
 - `tests/statements.test.ts` (S1–S8): pins, through the public API, what a statement binds and reads back — payload, result and `error_details` after the JSON round trip, the optional filters and pages of `fetchAll` / `getRunHistory`, the unregister cascade, and the health status. A change to how statements are built must keep it green unchanged. It deliberately does not assert the `latencyMs` or the error text of an unhealthy status, nor the class of a rejected database call. Its `settled(cron, names)` helper waits for each job's `onDone` / `onError`
 
 ### Avoiding leaked timers in tests with abandoned handlers
@@ -359,7 +362,7 @@ export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
 export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler,
               CronOptions, CronRegisterOptions, CronContext,
               CronTenantScope, CronStopOptions, CronDb,
-              DbRetryOptions } from "./cron.ts";
+              DbRetryOptions, DbHealthStatus } from "./cron.ts";
 export { CronParser, type CronParserOptions } from "@marianmeres/cron-parser"; // re-export
 
 // Task Registry
