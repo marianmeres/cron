@@ -67,7 +67,7 @@
     "@marianmeres/modelize": "^3.0.0",
     "@marianmeres/parse-boolean": "^2.2.0",
     "@marianmeres/pubsub": "^3.1.0",
-    "@marianmeres/sqlkit": "^0.3.1"
+    "@marianmeres/sqlkit": "^0.3.2"
   },
   "peerDependencies": {
     "ajv": "^8.20.0"
