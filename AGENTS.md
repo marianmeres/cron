@@ -55,6 +55,9 @@ tests/
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
                             shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
                             heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
+  statements.test.ts      — 10 tests, S1–S8: what statements read and write — payload and result JSON
+                            round trips, run-log rows of success / error / timeout, fetchAll and
+                            getRunHistory filters and pages, unregister cascade, checkDbHealth / getDbHealth
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
 jsr.json                  — JSR manifest: exports, jsr:/npm: import map, publish.include
@@ -305,6 +308,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - Test 33: legacy migration with a mixed-case `tablePrefix` — `colExists()` lower-cases identifiers to match Postgres folding (else the rename silently no-ops)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
 - `tests/cron-fixes.test.ts`: covers withTx atomicity / rollback, lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
+- `tests/statements.test.ts` (S1–S8): pins, through the public API, what a statement binds and reads back — payload, result and `error_details` after the JSON round trip, the optional filters and pages of `fetchAll` / `getRunHistory`, the unregister cascade, and the health status. A change to how statements are built must keep it green unchanged. It deliberately does not assert the `latencyMs` or the error text of an unhealthy status, nor the class of a rejected database call. Its `settled(cron, names)` helper waits for each job's `onDone` / `onError`
 
 ### Avoiding leaked timers in tests with abandoned handlers
 
@@ -362,6 +366,6 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 75 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 85 tests); `pnpm run format` before committing
 - [ ] Before a JSR publish: `pnpm run test:deno` and `pnpm run jsr:check`
 - [ ] DB integration tests require `TEST_PG_*` env vars
