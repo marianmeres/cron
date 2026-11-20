@@ -20,11 +20,14 @@ import {
 	RUN_STATUS,
 } from "../src/mod.ts";
 import { createPg } from "./_pg.ts";
+import { clearOfMinuteBoundary } from "./_time.ts";
 
 // ---- test helpers -------------------------------------------------------
 
 const TABLE_PREFIX = "_test_";
 const POLL = 50; // fast polling for tests (ms)
+/** Once a year: a job that must run exactly once is registered with it and backdated. */
+const YEARLY = "0 0 1 1 *";
 
 /** Silent logger — keeps test output clean */
 const noopLogger = {
@@ -183,6 +186,10 @@ test("6 missed-ticks-are-skipped-not-replayed", async () => {
 	// immediate runs and a `next_run_at` still in the past after the first one.
 	// (That the next slot is derived from the scheduled time rather than the wall
 	// clock is covered by the `_nextRunAt` unit tests in cron-fixes.test.ts.)
+	//
+	// The job has to stay per-minute, so a near minute boundary is waited out first:
+	// passing mid-test, it would make the job due again and look like a replay.
+	await clearOfMinuteBoundary();
 	const { db, cron } = await setup();
 	try {
 		let runs = 0;
@@ -226,7 +233,7 @@ test("7 failure-with-retries-succeeds-on-third-attempt", async () => {
 		let attempts = 0;
 		await cron.register(
 			"retry-job",
-			"* * * * *",
+			YEARLY,
 			async () => {
 				attempts++;
 				if (attempts < 3) throw new Error(`fail attempt ${attempts}`);
@@ -259,7 +266,7 @@ test("8 max-attempts-exceeded-advances-schedule", async () => {
 		let attempts = 0;
 		await cron.register(
 			"always-fail",
-			"* * * * *",
+			YEARLY,
 			async () => {
 				attempts++;
 				throw new Error("always fails");
@@ -373,7 +380,7 @@ test("12 concurrent-no-double-execution", async () => {
 	const cron2 = createCron(db);
 
 	try {
-		await cron1.register("shared", "* * * * *", handler);
+		await cron1.register("shared", YEARLY, handler);
 		await backdateNextRun(db, "shared");
 
 		cron2.setHandler("shared", handler);
@@ -447,15 +454,40 @@ test("15 getRunHistory-returns-logs", async () => {
 	try {
 		let runs = 0;
 		await cron.register("history", "* * * * *", async () => ++runs);
+
+		// Each run is awaited through `onDone` (published once the run is recorded), not
+		// a fixed sleep: a second backdate landing before the first run is recorded is
+		// overwritten by that run's reschedule, and only one run would happen.
+		let recorded = 0;
+		let check = () => {};
+		cron.onDone("history", () => {
+			recorded++;
+			check();
+		});
+		/** Resolves once `n` runs are recorded; rejects after `ms`. */
+		const runsRecorded = (n: number, ms = 5_000) =>
+			new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(
+					() => reject(new Error(`run ${n} not recorded within ${ms} ms`)),
+					ms,
+				);
+				check = () => {
+					if (recorded < n) return;
+					clearTimeout(timer);
+					resolve();
+				};
+				check();
+			});
+
 		await cron.start(1);
 
 		// First run
 		await backdateNextRun(db, "history");
-		await sleep(200);
+		await runsRecorded(1);
 
 		// Second run
 		await backdateNextRun(db, "history");
-		await sleep(200);
+		await runsRecorded(2);
 
 		const history = await cron.getRunHistory("history");
 		assert.ok(history.length >= 2, "must have at least 2 run log entries");
@@ -814,8 +846,8 @@ test("28 forTenant-event-isolation", async () => {
 	const projB = cron.forTenant("tenant-b");
 
 	try {
-		await projA.register("job", "* * * * *", async () => "a");
-		await projB.register("job", "* * * * *", async () => "b");
+		await projA.register("job", YEARLY, async () => "a");
+		await projB.register("job", YEARLY, async () => "b");
 
 		let doneA: CronJob | null = null;
 		let doneB: CronJob | null = null;
@@ -937,10 +969,10 @@ test("31 forTenant-correct-handler-per-tenant", async () => {
 	try {
 		let resultA = "";
 		let resultB = "";
-		await projA.register("job", "* * * * *", async () => {
+		await projA.register("job", YEARLY, async () => {
 			resultA = "handler-a";
 		});
-		await projB.register("job", "* * * * *", async () => {
+		await projB.register("job", YEARLY, async () => {
 			resultB = "handler-b";
 		});
 

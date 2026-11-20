@@ -49,6 +49,7 @@ src/
       pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
+  _time.ts                — clearOfMinuteBoundary(): waits a near minute boundary out before a test
   cron-db.test.ts         — 33 integration tests (requires DB, includes tenant_id scoping + legacy migration)
   cron-fixes.test.ts      — 14 tests covering B1/B4/B5/B6/D1/D2/D4 + pruneRunLog + sync orphan handlers
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
@@ -295,8 +296,9 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - `backdateNextRun(db, name)` — forces `next_run_at` into the past so poller picks it up
 - `createCronWithTenant(db, tenantId)` — helper for tenant-scoped tests
 - Test 9 (timeout): handler's `sleep(500)` is abandoned by TimeoutError at 50ms; test waits 700ms to let the timer fire during the test — avoids cross-test leaks
-- Test 6 (missed ticks): 10-minute backdate on a per-minute job must yield exactly 1 run and a future `next_run_at`
-- `tests/cron-fixes-2.test.ts`: jobs that must run exactly once use a yearly expression (`0 0 1 1 *`) + backdate, so a minute boundary passing mid-test cannot add a run. `failNextTxCheckouts(db, n)` makes the next `n` `withTx` checkouts fail with `ECONNRESET` while `pool.query()` keeps working (bare `pool.connect()` vs `pool.connect(cb)`)
+- **No test may straddle a schedule slot.** A `* * * * *` job comes due again at every minute boundary, so a test that asserts an exact number of runs, or that a job did not run, registers its job with the yearly expression `0 0 1 1 *` (the `YEARLY` constant of the DB test files) and backdates it to make it due once. A test that has to keep a per-minute job calls `clearOfMinuteBoundary()` from `tests/_time.ts` first. Wait for a run through `onDone` rather than a fixed sleep where the next step depends on it being recorded (test 15)
+- Test 6 (missed ticks): 10-minute backdate on a per-minute job must yield exactly 1 run and a future `next_run_at`; it keeps `* * * * *`, so it calls `clearOfMinuteBoundary()` before its setup
+- `tests/cron-fixes-2.test.ts`: `failNextTxCheckouts(db, n)` makes the next `n` `withTx` checkouts fail with `ECONNRESET` while `pool.query()` keeps working (bare `pool.connect()` vs `pool.connect(cb)`)
 - Heartbeat tests set `heartbeatIntervalMs: 40`; the 30 s default never fires inside a test
 - Tests 21-31: tenant_id scoping (isolation, find, unregister, enable/disable, claim)
 - Test 32: legacy `project_id` → `tenant_id` migration (column + indexes renamed in place, data preserved, idempotent)

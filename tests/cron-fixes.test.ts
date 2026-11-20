@@ -34,6 +34,8 @@ import { createPg } from "./_pg.ts";
 
 const TABLE_PREFIX = "_test_";
 const POLL = 50;
+/** Once a year: a job that must run exactly once is registered with it and backdated. */
+const YEARLY = "0 0 1 1 *";
 
 const noopLogger = {
 	debug: () => {},
@@ -220,8 +222,8 @@ test("B5: lease token is set on claim, cleared on success", async () => {
 test("B4: subscribing to multiple names then unsubscribing once detaches all", async () => {
 	const { db, cron } = await setup();
 	try {
-		await cron.register("evt-a", "* * * * *", async () => "a");
-		await cron.register("evt-b", "* * * * *", async () => "b");
+		await cron.register("evt-a", YEARLY, async () => "a");
+		await cron.register("evt-b", YEARLY, async () => "b");
 
 		let calls = 0;
 		const cb = (_job: CronJob) => {
