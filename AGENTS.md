@@ -290,7 +290,7 @@ The task registry (`src/task-registry.ts`) is an in-memory `Map<string, TaskDefi
 - v2 → v3: add `lease_token` and `timezone` columns + add CHECK constraints
 - data repair: re-stamp run-log rows whose `tenant_id` differs from their job's (older releases logged under the executing instance's tenant). Joined through the `cron_id` FK; a no-op once repaired.
 
-The legacy rename uses a `colExists()` JS helper to build an `information_schema.columns` guard (Postgres has no `IF EXISTS` for `RENAME COLUMN`), schema-qualified when a `tablePrefix` carries a schema. The helper lower-cases the table/schema names so the guard matches Postgres's unquoted-identifier folding — a mixed-case `tablePrefix` would otherwise skip the rename. When extending the schema in the future, add a new step inside `Cron.migrate` and bump the conceptual version note. CHECK additions go through the `addCheckIfMissing` helper (Postgres has no `IF NOT EXISTS` for constraints).
+The legacy rename uses a `colExists()` JS helper to build an `information_schema.columns` guard (Postgres has no `IF EXISTS` for `RENAME COLUMN`), schema-qualified when a `tablePrefix` carries a schema. The helper lower-cases the table/schema names so the guard matches Postgres's unquoted-identifier folding — a mixed-case `tablePrefix` would otherwise skip the rename. When extending the schema in the future, add a new step inside `Cron.migrate` and bump the conceptual version note. CHECK additions go through the `addCheckIfMissing` helper (Postgres has no `IF NOT EXISTS` for constraints), which lower-cases the constraint name it looks up in `pg_constraint` for the same folding reason — a mixed-case `tablePrefix` would otherwise miss the existing constraint and fail the second call with 42710.
 
 ---
 
@@ -310,7 +310,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - Heartbeat tests set `heartbeatIntervalMs: 40`; the 30 s default never fires inside a test
 - Tests 21-31: tenant_id scoping (isolation, find, unregister, enable/disable, claim)
 - Test 32: legacy `project_id` → `tenant_id` migration (column + indexes renamed in place, data preserved, idempotent)
-- Test 33: legacy migration with a mixed-case `tablePrefix` — `colExists()` lower-cases identifiers to match Postgres folding (else the rename silently no-ops)
+- Test 33: legacy migration with a mixed-case `tablePrefix`, run twice — `colExists()` and `addCheckIfMissing` lower-case identifiers to match Postgres folding (else the rename silently no-ops, or the second call re-adds a CHECK constraint and fails)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
 - `tests/cron-fixes.test.ts`: covers withTx atomicity / rollback, lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
 - `tests/statements.test.ts` (S1–S8): pins, through the public API, what a statement binds and reads back — payload, result and `error_details` after the JSON round trip, the optional filters and pages of `fetchAll` / `getRunHistory`, the unregister cascade, and the health status. A change to how statements are built must keep it green unchanged. It deliberately does not assert the `latencyMs` or the error text of an unhealthy status, nor the class of a rejected database call. Its `settled(cron, names)` helper waits for each job's `onDone` / `onError`

@@ -1189,6 +1189,16 @@ test("33 migrate-legacy-rename-with-mixed-case-prefix", async () => {
 			"acme",
 			"data preserved across the case-sensitive rename",
 		);
+
+		// Idempotent on a mixed-case prefix too. Postgres folds the CHECK
+		// constraint names to lower case, so the existence lookup must compare
+		// lower-cased names, or the second call re-adds them and fails (42710).
+		await Cron.migrate(db, PREFIX);
+		assert.deepStrictEqual(
+			(await cols(cron)).sort(),
+			[...cronCols].sort(),
+			"columns unchanged by a second migrate()",
+		);
 	} finally {
 		await db.query(`DROP TABLE IF EXISTS ${runLog}; DROP TABLE IF EXISTS ${cron};`);
 		await db.end();

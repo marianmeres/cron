@@ -1456,6 +1456,10 @@ export class Cron {
 
 			// v2 → v3: CHECK constraints (Postgres has no IF NOT EXISTS for constraints,
 			// so we look it up first and add only if missing).
+			//
+			// The constraint is added under the unquoted name, which Postgres folds
+			// to lower case, so the lookup compares the lower-cased name — otherwise
+			// a mixed-case `tablePrefix` misses it and a second call fails (42710).
 			const addCheckIfMissing = async (
 				table: string,
 				name: string,
@@ -1463,7 +1467,7 @@ export class Cron {
 			) => {
 				const exists = await client.query(
 					`SELECT 1 FROM pg_constraint WHERE conname = $1`,
-					[name],
+					[name.toLowerCase()],
 				);
 				if (exists.rowCount === 0) {
 					await client.query(
