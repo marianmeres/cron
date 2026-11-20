@@ -8,18 +8,29 @@ const cron = new Cron(options: CronOptions);
 
 ### Constructor Options (`CronOptions`)
 
-| Option                | Type                                                        | Default        | Description                                                                                                                                                                                            |
-| --------------------- | ----------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `db`                  | `pg.Pool \| pg.Client`                                      | required       | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` works too, its statements take turns (see `start()`)                                                                                      |
-| `tenantId`            | `string`                                                    | `"_default"`   | Tenant scope identifier — isolates all jobs to this tenant                                                                                                                                             |
-| `tablePrefix`         | `string`                                                    | `""`           | Prefix for table names (e.g. `"myschema."`)                                                                                                                                                            |
-| `pollTimeoutMs`       | `number`                                                    | `1000`         | Poll interval when no jobs are due (ms)                                                                                                                                                                |
-| `gracefulSigterm`     | `boolean`                                                   | `true`         | Register SIGTERM handler for graceful shutdown. Attached by `start()`, detached by `stop()`                                                                                                            |
-| `logger`              | `Logger`                                                    | `clog("cron")` | Logger instance                                                                                                                                                                                        |
-| `dbRetry`             | `DbRetryOptions \| boolean`                                 | —              | Enable retry on transient DB errors. Covers the claim query and the writes that record a run's outcome                                                                                                 |
-| `dbHealthCheck`       | `boolean \| object`                                         | —              | Enable DB health monitoring                                                                                                                                                                            |
-| `heartbeatIntervalMs` | `number`                                                    | `30000`        | How often a worker renews the claim of the job it is executing (bumps `last_run_at`), so a long-running job is not treated as crashed. Keep it at a third of the stale threshold or less. `0` disables |
-| `autoCleanup`         | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }` | —              | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`)                                                                                              |
+| Option                | Type                                                               | Default        | Description                                                                                                                                                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `db`                  | `CronDb` (`pg.Pool \| pg.Client \| Driver`)                        | required       | PostgreSQL connection: a `pg.Pool` (recommended), a connected `pg.Client`, or a sqlkit `Driver` of the `pg` dialect (see [`CronDb`](#crondb)). Anything else is a `TypeError` here. On a single connection every statement takes its turn (see `start()`). cron never ends it |
+| `tenantId`            | `string`                                                           | `"_default"`   | Tenant scope identifier — isolates all jobs to this tenant                                                                                                                                                                                                                    |
+| `tablePrefix`         | `string`                                                           | `""`           | Prefix for table names (e.g. `"myschema."`)                                                                                                                                                                                                                                   |
+| `pollTimeoutMs`       | `number`                                                           | `1000`         | Poll interval when no jobs are due (ms)                                                                                                                                                                                                                                       |
+| `gracefulSigterm`     | `boolean`                                                          | `true`         | Register SIGTERM handler for graceful shutdown. Attached by `start()`, detached by `stop()`                                                                                                                                                                                   |
+| `logger`              | `Logger`                                                           | `clog("cron")` | Logger instance                                                                                                                                                                                                                                                               |
+| `dbRetry`             | `DbRetryOptions \| boolean`                                        | —              | Retry transient DB errors with exponential backoff; `true` for the defaults (see [`DbRetryOptions`](#dbretryoptions)). Covers the claim query and the writes that record a run's outcome                                                                                      |
+| `dbHealthCheck`       | `boolean \| { intervalMs?, timeoutMs?, onUnhealthy?, onHealthy? }` | —              | DB health monitoring, started by `start()`; `true` for the defaults (see [DB Health](#db-health))                                                                                                                                                                             |
+| `heartbeatIntervalMs` | `number`                                                           | `30000`        | How often a worker renews the claim of the job it is executing (bumps `last_run_at`), so a long-running job is not treated as crashed. Keep it at a third of the stale threshold or less. `0` disables                                                                        |
+| `autoCleanup`         | `boolean \| { intervalMs?, maxAllowedRunDurationMinutes? }`        | —              | Automatically `cleanup()` on a timer (`true` ≡ `{ intervalMs: 60_000, maxAllowedRunDurationMinutes: 5 }`)                                                                                                                                                                     |
+
+**`dbHealthCheck` options:**
+
+| Option        | Type                               | Default | Description                                                                                                 |
+| ------------- | ---------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `intervalMs`  | `number`                           | `30000` | Time from one check's answer (or timeout) to the next check, so checks never overlap. `0` means the default |
+| `timeoutMs`   | `number`                           | `5000`  | A check that has not answered by then is unhealthy. Its query is abandoned, not cancelled                   |
+| `onUnhealthy` | `(status: DbHealthStatus) => void` | —       | Called when the database becomes unhealthy, including a first check that fails                              |
+| `onHealthy`   | `(status: DbHealthStatus) => void` | —       | Called when the database recovers. A first check that is healthy is no change and calls nothing             |
+
+A negative `intervalMs`, or a `timeoutMs` that is not above 0, is a `TypeError` from the constructor. The monitor logs on a change of state only, and its timer never keeps the process alive.
 
 #### Tenant scoping
 
@@ -52,9 +63,11 @@ Initialises the schema (idempotent) and starts N polling workers. Processors are
 await cron.start(2); // 2 concurrent workers (default)
 ```
 
-**Rejects** if the schema cannot be initialised, or if a `stop()` is still draining. Nothing is started in either case.
+The schema is created under an advisory lock, so several instances may start at once on a database that has no cron tables yet. The schema check runs once per instance, on first use (`start()` or the first management call): when `db` is a driver shared with your own code, make that first call outside any transaction of yours (see [`CronDb`](#crondb)). With `dbHealthCheck` set, `start()` also runs the first health check before it resolves.
 
-With a single `pg.Client` as `db` every processor shares that one session: each statement takes its turn, so handlers overlap but database work does not. A `pg.Pool` is still the recommendation.
+**Rejects** if the schema cannot be initialised (with the database's [error](#errors)), or if a `stop()` is still draining. Nothing is started in either case.
+
+With a single `pg.Client` as `db`, or a driver over one connection, every processor shares that one session: each statement takes its turn, so handlers overlap but database work does not. A `pg.Pool` is still the recommendation.
 
 #### `cron.stop(options?: { drainTimeoutMs?: number }): Promise<void>`
 
@@ -287,28 +300,41 @@ The `tenantId` is available as a readonly property: `tenantA.tenantId`.
 
 ### DB Health
 
+A health check is one `select 1`, timed. A check that has not answered within its timeout is unhealthy; its query is abandoned, not cancelled. A database that is down or does not answer gives an unhealthy [`DbHealthStatus`](#dbhealthstatus), never a rejection. After a healthy check the status carries `pgVersion`, asked once and then remembered.
+
 #### `cron.getDbHealth(): DbHealthStatus | null`
 
-Returns the last DB health status (requires `dbHealthCheck` option). Returns `null` if monitoring is disabled.
+Returns the latest status of the monitor that the `dbHealthCheck` option starts. `null` when the option is not set, and before `start()` has run the first check. After `stop()` the monitor stops and the last status stays.
+
+```typescript
+const cron = new Cron({ db, dbHealthCheck: { timeoutMs: 2_000 } });
+await cron.start();
+cron.getDbHealth(); // { healthy: true, latencyMs: 0.8, error: null, timestamp, pgVersion: "18.6" }
+```
 
 #### `cron.checkDbHealth(): Promise<DbHealthStatus>`
 
-Runs a one-off DB health check.
+Runs one check now, whether `dbHealthCheck` is set or not, with a 5 s timeout (`dbHealthCheck.timeoutMs` applies to the monitor only). A failed check is logged at error level.
+
+```typescript
+const status = await cron.checkDbHealth();
+if (!status.healthy) console.error(status.error);
+```
 
 ---
 
 ### Static Methods
 
-#### `Cron.migrate(db, tablePrefix?): Promise<void>`
+#### `Cron.migrate(db: CronDb, tablePrefix?: string): Promise<void>`
 
-Idempotent schema migration. Brings any prior schema up to current. Safe to call multiple times. Handles:
+Idempotent schema migration. `db` is a pool, a client or a `pg` driver, as for the constructor ([`CronDb`](#crondb)). Brings any prior schema up to current. Safe to call multiple times. Handles:
 
 - **Legacy `project_id` → `tenant_id`**: renames the old column (and its indexes) in place when present, preserving existing data.
 - **v1 → v2**: adds the `tenant_id` column and reshapes indexes.
 - **v2 → v3**: adds `lease_token` and `timezone` columns plus CHECK constraints.
 - **Data repair**: re-stamps run-log rows whose `tenant_id` differs from their job's (3.2 and earlier logged every run under the instance's own tenant).
 
-The migration runs in a real transaction (single connection — works against `pg.Pool`).
+The migration runs in one transaction, on one connection, whichever form `db` takes. Safe to call again with a mixed-case `tablePrefix`.
 
 ```typescript
 await Cron.migrate(db);
@@ -432,6 +458,33 @@ console.log("Stale handlers removed:", removedHandlers);
 - `synced` (string[]) — Task types whose handlers were wired
 - `orphans` (string[]) — Job names in DB with no matching registry entry
 - `removedHandlers` (string[]) — In-memory handlers removed because they no longer appear in the registry
+
+---
+
+## Errors
+
+- **A database call that fails** rejects with a `SqlError` from [`@marianmeres/sqlkit`](https://www.npmjs.com/package/@marianmeres/sqlkit), as the subclass of its kind: `ConnectionError`, `DeadlockError`, `SerializationError`, `BusyError`, `UniqueViolationError`, `TransactionAbortedError`, … That holds for every method that reads or writes the database, and for `start()` when the schema cannot be initialised.
+  - `code` — node-postgres's: the SQLSTATE (`40P01`), or Node's code for a lost socket (`ECONNRESET`)
+  - `message` — node-postgres's
+  - `kind` — the class as a string (`"connection"`, `"deadlock"`, …)
+  - `retryable` — whether `dbRetry` retries it by default
+  - `cause` — node-postgres's error, untouched: read `detail`, `severity` or `where` there
+- **A programming mistake** is a `TypeError`, never wrapped: a missing `db` or a driver whose dialect is not `pg`, and a `dbHealthCheck` option out of range (all from the constructor); a `dbRetry` option out of range (at the first call it wraps, see [`DbRetryOptions`](#dbretryoptions)).
+- **What a handler throws** is not a database error: it fails the attempt and is recorded in the run log.
+
+```typescript
+import { ConnectionError, SqlError } from "@marianmeres/sqlkit";
+
+try {
+  await cron.register("report", "0 8 * * *", handler);
+} catch (e) {
+  if (e instanceof ConnectionError) retryLater();
+  else if (e instanceof SqlError) console.error(e.kind, e.code, e.cause);
+  else throw e;
+}
+```
+
+`instanceof` holds against the copy of `@marianmeres/sqlkit` that cron itself resolves; `kind` and `code` hold whatever copy you import.
 
 ---
 
@@ -582,6 +635,66 @@ interface CronStopOptions {
   drainTimeoutMs?: number;
 }
 ```
+
+---
+
+### `CronDb`
+
+```typescript
+type CronDb = PgPoolLike | PgStandaloneClientLike | Driver;
+```
+
+What `CronOptions.db` and `Cron.migrate()` take. `PgPoolLike` and `PgStandaloneClientLike` are sqlkit's structural types (`@marianmeres/sqlkit/pg`): a `pg.Pool` and a connected `pg.Client` fit them as they are, so cron imports nothing from `pg`. `Driver` is a sqlkit driver; its `dialect` must be `"pg"`, as with `createPgDriver(pool)` or `createPgClientDriver(client)`.
+
+- cron builds one driver per pool or client object and reuses it, however many `Cron` instances, `checkDbHealth()` or `Cron.migrate()` calls share that object. A `Driver` is used as it is.
+- cron never closes what it is given: no `end()`, no `close()`.
+- A shared `Driver` carries your transactions. A `cron.register()` called inside your `driver.transaction()` is part of it, and the job exists only if you commit. `dbRetry` cannot help there: after a failure Postgres has aborted the transaction.
+- Make an instance's first call, and `start()`, outside any transaction of yours. On a database with no cron tables yet, a schema check inside a transaction that rolls back is rolled back with it, and the instance does not check again.
+- When cron and another sqlkit-based library use the same pool, build one `Driver` and pass it to both. Two drivers on one pool each take the other's `error` listener for the host's, so neither reports a dropped idle connection.
+
+```typescript
+import pg from "pg";
+import { createPgDriver } from "@marianmeres/sqlkit/pg";
+
+const driver = createPgDriver(new pg.Pool({ connectionString: process.env.DATABASE_URL }));
+const cron = new Cron({ db: driver });
+await Cron.migrate(driver);
+```
+
+### `DbRetryOptions`
+
+```typescript
+interface DbRetryOptions {
+  maxRetries?: number;        // calls after the first, a non-negative integer (default: 3)
+  initialDelayMs?: number;    // wait before the first retry (default: 100)
+  maxDelayMs?: number;        // longest wait between two calls (default: 5000)
+  backoffMultiplier?: number; // each wait times this is the next one, at least 1 (default: 2)
+  retryableErrors?: string[]; // replaces the default classification
+  logger?: Logger;            // ignored in CronOptions.dbRetry: cron passes its own
+}
+```
+
+The options of `CronOptions.dbRetry` (`true` means all defaults). The wait before retry `n` is `initialDelayMs * backoffMultiplier ** (n - 1)`, at most `maxDelayMs`. Each retry is logged at warn level.
+
+By default an error is retried when sqlkit classifies it as retryable, by its code: a lost or refused connection (Node's socket codes, SQLSTATE class `08`), a server starting up or shutting down (`57P01`–`57P03`), too many connections (`53300`), a deadlock (`40P01`), a serialization failure (`40001`), a lock not granted in time (`55P03`), and node-postgres's pool timeout and terminated connection, which carry no code. A code that appears only in an error's message does not count.
+
+`retryableErrors` replaces that: an error is retried exactly when its `code` is in the list, or its message contains one of the entries.
+
+An option of the wrong type or out of range (a negative or fractional `maxRetries`, a `backoffMultiplier` below 1, a negative delay) is a `TypeError` at the first call `dbRetry` wraps. That call is the claim: the processors log the error as a claim error and claim nothing.
+
+### `DbHealthStatus`
+
+```typescript
+interface DbHealthStatus {
+  healthy: boolean;
+  latencyMs: number | null; // null when the check failed; may be a fraction
+  error: string | null;     // the driver's message, or the timeout's; null when healthy
+  timestamp: Date;          // when the check was sent
+  pgVersion?: string;       // e.g. "18.6", after a healthy check
+}
+```
+
+What `cron.checkDbHealth()` and `cron.getDbHealth()` return, and what `onUnhealthy` / `onHealthy` receive.
 
 ---
 

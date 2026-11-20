@@ -4,20 +4,27 @@
 [![License](https://img.shields.io/npm/l/@marianmeres/cron)](LICENSE)
 
 PostgreSQL-backed recurring cron job scheduler. Concurrent workers via
-`FOR UPDATE SKIP LOCKED`, drift-safe scheduling, real transactions on `pg.Pool`,
-per-claim lease tokens (so stale-recovered jobs cannot clobber fresh
-results) kept alive by a heartbeat (so long-running jobs are not mistaken for
-crashed ones), retries with capped exponential backoff, per-attempt timeouts
-with `AbortSignal` cancellation, IANA timezone-aware schedules, tenant-scoped
-isolation, and an optional task registry for UI-driven job management.
+`FOR UPDATE SKIP LOCKED`, drift-safe scheduling, real transactions (on a `pg.Pool`,
+a `pg.Client` or a sqlkit `Driver`), per-claim lease tokens (so stale-recovered
+jobs cannot clobber fresh results) kept alive by a heartbeat (so long-running jobs
+are not mistaken for crashed ones), retries with capped exponential backoff,
+per-attempt timeouts with `AbortSignal` cancellation, IANA timezone-aware
+schedules, tenant-scoped isolation, and an optional task registry for UI-driven
+job management.
 
 ## Installation
 
 ```bash
-npm install @marianmeres/cron
+npm install @marianmeres/cron pg
 ```
 
+cron takes the pool or client you build and does not depend on `pg` itself:
+install the `pg` you build it with. It runs on Node 24.20+ or 26.6+ (what its
+database layer, [`@marianmeres/sqlkit`](https://www.npmjs.com/package/@marianmeres/sqlkit),
+asks for).
+
 The package is published to npm only. Version 3.3.0 is the last one on JSR.
+Upgrading from 3.x? See [Upgrading to 4.0](#upgrading-to-40).
 
 ## Usage
 
@@ -142,12 +149,78 @@ await cron.register("job", "* * * * *", handler);
 await cron.start(1);
 ```
 
-Pass a `pg.Pool`. A single `pg.Client` also works with several processors, but
-it is one database session: every statement takes its turn on it, so handlers
-overlap and their database work does not.
+Instances may boot at the same time on a database that has no cron tables yet:
+creating the schema takes an advisory lock, so one creates it and the others
+find it done.
 
 `start()` rejects if the schema cannot be initialised — nothing is started in
 that case, so handle the rejection the way you would any failed boot step.
+
+### The database: a pool, a client or a driver
+
+`db` takes a `pg.Pool` (the recommendation), a connected `pg.Client`, or a
+[`@marianmeres/sqlkit`](https://www.npmjs.com/package/@marianmeres/sqlkit)
+`Driver` of the `pg` dialect. Anything else is a `TypeError` from `new Cron()`.
+`Cron.migrate()` takes the same.
+
+```typescript
+import { createPgDriver } from "@marianmeres/sqlkit/pg";
+
+const driver = createPgDriver(new pg.Pool({ connectionString: process.env.DATABASE_URL }));
+const cron = new Cron({ db: driver });
+```
+
+A single `pg.Client` (or a driver over one connection) works with several
+processors, but it is one database session: every statement takes its turn on
+it, so handlers overlap and their database work does not.
+
+cron never closes what it is given: the pool, the client or the driver stays
+yours to end. When you share a driver with your own code:
+
+- **It carries your transactions.** A `cron.register()` called inside your
+  `driver.transaction()` is part of it: the job exists only if you commit.
+- **Make the first cron call of a process, and `start()`, outside any
+  transaction.** An instance checks the schema once, on first use. Inside a
+  transaction that then rolls back, on a database that had no cron tables yet,
+  the schema is rolled back too, and the instance does not check again.
+- **`dbRetry` cannot help inside your transaction**: after a failure Postgres
+  has aborted it.
+- **One pool, one driver.** If cron and another sqlkit-based library (such as
+  `@marianmeres/steve`) use the same pool, build one `Driver` and pass it to
+  both. Each library handed the raw pool builds a driver of its own, and two
+  drivers on one pool each take the other's `error` listener for yours, so
+  neither reports a dropped idle connection.
+
+### Database errors, retry and health
+
+A database call that fails rejects with a `SqlError` from `@marianmeres/sqlkit`,
+as the subclass of its kind (`ConnectionError`, `DeadlockError`,
+`UniqueViolationError`, …). Its `code` and `message` are node-postgres's, and the
+original error is its `cause`. A programming mistake (no `db`, a driver of
+another dialect, an option out of range) is a `TypeError`. See
+[Errors](API.md#errors).
+
+```typescript
+const cron = new Cron({
+  db,
+  dbRetry: true, // or { maxRetries, initialDelayMs, maxDelayMs, backoffMultiplier }
+  dbHealthCheck: { intervalMs: 30_000, timeoutMs: 2_000, onUnhealthy: alertOps },
+});
+```
+
+- **`dbRetry`** runs a failed claim, or a failed write that records a run, again
+  with exponential backoff, when the failure is transient: a lost or refused
+  connection, a server starting up, shutting down or out of connections, a pool
+  that timed out connecting, a deadlock, a serialization failure, a lock not
+  granted in time. It goes by the kind of failure, not by a code found in the
+  error's message; a constraint violation or a syntax error is never retried. `retryableErrors: ["…"]` retries exactly the
+  codes you list instead.
+- **`dbHealthCheck`** runs a `select 1` every `intervalMs` (default 30 s) from
+  `start()` on. A check that has not answered within `timeoutMs` (default 5 s)
+  is unhealthy. `onUnhealthy` / `onHealthy` fire when the state flips;
+  `cron.getDbHealth()` returns the latest status and `cron.checkDbHealth()` runs
+  one check now. A database that is down gives an unhealthy status, never a
+  rejection.
 
 ### Maintenance
 
@@ -282,6 +355,72 @@ place**, preserving existing data; adds missing columns (`tenant_id`,
 `lease_token`, `timezone`); adjusts indexes; and adds CHECK constraints. It also
 repairs run-log rows that 3.2 and earlier stamped with the wrong `tenant_id`
 (see below). Safe to call multiple times.
+
+## Upgrading to 4.0
+
+The public API is source-compatible: code written for 3.3 compiles unchanged.
+Every method signature, the events, the `dbRetry` and `dbHealthCheck` option
+shapes and the health status object stay as they were. The database schema is unchanged too; there is no
+migration to run. It is a major release because of what changes underneath:
+cron now runs every statement through
+[`@marianmeres/sqlkit`](https://www.npmjs.com/package/@marianmeres/sqlkit), which
+changes what a database error looks like, what is retried and how health is
+checked; `pg` leaves the dependencies; and JSR publishing stops.
+
+### Changed
+
+- **A failed database call rejects with a sqlkit `SqlError`** (`ConnectionError`,
+  `DeadlockError`, …). `code` and `message` are node-postgres's. The original
+  error is `cause`: read fields such as `detail` or `severity` there.
+- **`dbRetry` retries more.** Besides lost connections it now retries deadlocks,
+  serialization failures, a lock not granted in time, a server shutting down or
+  out of connections, a pool that timed out connecting, and a terminated
+  connection. A code that appears only inside an error's message no longer
+  counts. A `retryableErrors` list still replaces the
+  default, matched as before (the code, or the code inside the message).
+- **`dbRetry` values are checked.** A negative or fractional `maxRetries`, or a
+  `backoffMultiplier` below 1, is a `TypeError` at the first database call
+  `dbRetry` wraps. That call is the claim: the processors log the error as a
+  claim error and claim nothing.
+- **A health check is one `select 1`, and it times out.** A check that has not
+  answered in 5 s is unhealthy (`dbHealthCheck.timeoutMs`). `latencyMs` is
+  `null` on failure and may be a fraction of a millisecond on success. The
+  warning logged on every failed check is gone; the logs and the
+  `onUnhealthy` / `onHealthy` callbacks on a change of state stay. The monitor's
+  timer no longer keeps the process alive.
+- **cron listens to the pool's (or client's) `error` event.** An idle connection
+  the server dropped is now a process warning. With no `error` listener of your
+  own, it used to end the process.
+- **cron checks a connection out with `pool.connect()` for every statement** and
+  no longer calls `pool.query()`. A wrapper around `pool.query` that logs or
+  measures does not see cron's statements.
+- **A `db` that is not a pool, a client or a `pg` driver throws at
+  construction**, from `new Cron()`, not at the first query.
+- **`CronContext.db` is a sqlkit `Driver`.** The type is exported, but internal.
+- **No new versions on JSR.** 3.3.0 is the last one there.
+- **cron no longer depends on `pg`.** It never imported it at runtime: install
+  the `pg` you build your pool with, as you already do. It depends on
+  `@marianmeres/sqlkit` instead, which asks for Node 24.20+ or 26.6+.
+
+### Fixed
+
+- **Several instances starting at once on a database with no cron tables yet no
+  longer fail**: creating the schema takes an advisory lock. A 3.x instance
+  takes no lock, so this holds once every instance that may boot on a fresh
+  database runs 4.0.
+- **`Cron.migrate()` can be called again with a mixed-case `tablePrefix`.** The
+  second call used to fail on a CHECK constraint that was already there.
+
+### New
+
+- **`db` accepts a sqlkit `Driver`** of the `pg` dialect, and so does
+  `Cron.migrate()`. See [The database: a pool, a client or a driver](#the-database-a-pool-a-client-or-a-driver)
+  for what sharing one with your own code means.
+- **More than one processor on a single connection.** `start(n)` on a
+  `pg.Client`, or on a driver over one connection, runs all `n` processors
+  (3.3 ran one). Their statements take turns; their handlers overlap.
+- **`dbHealthCheck.timeoutMs`**, and three exported types: `CronDb`,
+  `DbRetryOptions` and `DbHealthStatus`.
 
 ## Behaviour changes since 3.2
 

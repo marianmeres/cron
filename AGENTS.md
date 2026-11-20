@@ -11,6 +11,8 @@
 - **Registry**: npm only; it gets `dist/` (manifest `package.json`). 3.3.0 is the last version
   on JSR.
 - **Entry**: `src/mod.ts` → `src/cron.ts` → `src/cron/cron.ts` (includes `CronTenantScope` interface)
+- **Human docs**: `README.md` (overview, "Upgrading to 4.0", history sections), `API.md` (full
+  reference). A change a consumer can see goes into both; the history sections stay as they are.
 
 ---
 
@@ -125,6 +127,13 @@ The driver checks the `COMMIT` (a transaction a failed statement aborted rejects
   - Minutes stay `(${n} * INTERVAL '1 minute')`: a fraction of a minute is valid input.
 - Type a row read: `db.query<CronJob>(…)`. `rowCount` is always a number.
 - Never call the driver's `close()`: it ends the host's pool or client. `toDriver` caches one driver per pool/client object (a `WeakMap`) because building one adds an `error` listener to the pool; a host's own `Driver` is used as it is.
+
+**A host's shared `Driver`** (the README and `API.md` `CronDb` say the same to consumers):
+
+- It carries the host's transactions: a `cron.register()` inside the host's `db.transaction()` joins it, and the job exists only if the host commits.
+- `#initializeOnce` runs once per instance, on first use. Inside a host transaction that rolls back, on a database with no cron tables yet, the schema goes with it and the instance does not check again: the first cron call and `start()` belong outside any transaction.
+- `dbRetry` cannot help inside a host transaction: after a failure Postgres has aborted it.
+- Two drivers on one pool each count the other's `error` listener as the host's, so neither reports a dropped idle connection: a host sharing a pool between cron and another sqlkit-based library builds one `Driver` for both.
 
 Currently used in:
 
@@ -355,6 +364,9 @@ TEST_PG_PORT=5432
 
 ## Key Exports (`src/mod.ts`)
 
+`src/mod.ts` re-exports with `export *`: every `export` in `src/cron/cron.ts`, `src/task-registry.ts`
+and `@marianmeres/cron-parser` is public. This is the resulting surface:
+
 ```typescript
 // Core
 export { Cron, DEFAULT_TENANT_ID } from "./cron.ts";
@@ -387,5 +399,5 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 95 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 98 tests); `pnpm run format` before committing
 - [ ] DB integration tests require `TEST_PG_*` env vars
