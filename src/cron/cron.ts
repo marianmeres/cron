@@ -208,9 +208,10 @@ export interface CronRegisterOptions {
 export interface CronOptions {
 	/**
 	 * PostgreSQL connection: a `pg.Pool`, a `pg.Client` or a sqlkit `Driver` whose
-	 * dialect is `pg` (anything else is a `TypeError` here). Use a `pg.Pool` for
-	 * anything real: a single `pg.Client` is one session, so it is limited to
-	 * **one** processor (`start()` clamps the count).
+	 * dialect is `pg` (anything else is a `TypeError` here). A pool is the
+	 * recommendation: a single `pg.Client` is one session, so every statement
+	 * takes its turn on it. Several processors still run, and their handlers
+	 * overlap, but their database work does not.
 	 *
 	 * cron never ends the pool, the client or the driver: they stay the host's.
 	 */
@@ -904,8 +905,9 @@ export class Cron {
 	 * Processors are global — they claim any due job regardless of tenant.
 	 * One `start()` call serves all tenants.
 	 *
-	 * With a single `pg.Client` as `db` (or any driver over one connection) the
-	 * count is clamped to 1 (see `CronOptions.db`).
+	 * With a single `pg.Client` as `db` (or any driver over one connection) all
+	 * processors share it: every statement takes its turn, so handlers overlap but
+	 * database work does not (see `CronOptions.db`).
 	 *
 	 * @param processorsCount - Number of concurrent workers (default: 2)
 	 * @throws If the schema cannot be initialised, or if a `stop()` is still
@@ -954,31 +956,22 @@ export class Cron {
 			process.on("SIGTERM", this.#sigtermListener);
 		}
 
-		// A single `pg.Client` is ONE session: a driver over it reports no
-		// concurrent writers, and its processors would only take turns on it.
-		let count = processorsCount;
-		if (!this.#db.capabilities.concurrentWriters) {
-			const allowed = Math.max(0, 1 - this.#jobProcessors.length);
-			if (count > allowed) {
-				this.#logger?.warn?.(
-					`A single pg.Client can serve only one processor; starting ${allowed} ` +
-						`instead of ${count}. Pass a pg.Pool to run concurrent processors.`,
-				);
-				count = allowed;
-			}
-		}
-
 		// Reuse the controller if already running, so that one `stop()` reaches
 		// every processor of this generation.
 		this.#shutdownCtrl ??= new AbortController();
 		const shutdownSignal = this.#shutdownCtrl.signal;
 
-		for (let i = 0; i < count; i++) {
+		// No clamp for a driver over one connection (a `pg.Client`, PGlite): it
+		// gives each transaction its turn, and a statement from outside an open
+		// transaction waits for it to end. Handlers overlap; database work does not.
+		for (let i = 0; i < processorsCount; i++) {
 			const processorId = `cron-processor-${i}`;
 			const processor = this.#processJobs(processorId, shutdownSignal);
 			this.#jobProcessors.push(processor);
 		}
-		this.#logger?.debug?.(`Cron processors initialized (count: ${count})...`);
+		this.#logger?.debug?.(
+			`Cron processors initialized (count: ${processorsCount})...`,
+		);
 	}
 
 	/**

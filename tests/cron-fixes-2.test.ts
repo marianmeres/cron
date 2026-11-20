@@ -8,7 +8,7 @@
  *        restartable instance and no resurrected processor
  * - R5:  shutdown during a retry backoff abandons the remaining attempts
  * - R6:  a failure to RECORD a run is not a handler failure; dbRetry covers it
- * - R7:  a single pg.Client is limited to one processor
+ * - R7:  several processors share a single pg.Client
  * - R8:  heartbeat keeps long-running jobs from being stale-recovered
  * - R9:  healthPreview returns numbers
  * - R10: onDone/onError wrap tracking is exact for names without a handler
@@ -551,32 +551,53 @@ test("R6: a failed result write is reported as such, never as a handler failure"
 });
 
 // =========================================================================
-// R7: single pg.Client
+// R7: one pg.Client serves several processors
 // =========================================================================
 
-test("R7: a single pg.Client is limited to one processor", async () => {
+test("R7: several processors share a single pg.Client", async () => {
 	const client = createPgClient();
 	await client.connect();
 	const { logger, lines } = recordingLogger();
-	const cron = createCron(client, { logger });
+	// A heartbeat every few ms puts statements from outside a transaction next to
+	// the finalization transactions of the other processors.
+	const cron = createCron(client, { logger, heartbeatIntervalMs: 5 });
 	await cron.resetHard();
 	try {
+		const names = Array.from({ length: 9 }, (_, i) => `job-${i}`);
 		let runs = 0;
-		await cron.register("solo", YEARLY, async () => {
-			runs++;
-		});
-		await backdate(client, "solo");
+		for (const name of names) {
+			await cron.register(name, YEARLY, async () => {
+				runs++;
+				await sleep(20);
+			});
+			await backdate(client, name);
+		}
 
 		await cron.start(3);
-		await sleep(250);
-		await cron.stop();
+		// The handler counter only: a test query on the client itself would bypass
+		// the driver's queue and land inside a transaction cron has open.
+		const deadline = Date.now() + 10_000;
+		while (runs < names.length && Date.now() < deadline) await sleep(20);
+		await cron.stop(); // waits for the last finalizations
 
+		assert.ok(lines.debug.some((l) => l.includes("count: 3")));
 		assert.ok(
-			lines.warn.some((l) => l.includes("single pg.Client")),
-			"clamping must be announced",
+			!lines.warn.some((l) => l.includes("single pg.Client")),
+			"nothing is clamped",
 		);
-		assert.ok(lines.debug.some((l) => l.includes("count: 1")));
-		assert.deepStrictEqual(runs, 1, "the one processor still does its job");
+		assert.deepStrictEqual(lines.error, []);
+		assert.deepStrictEqual(runs, names.length, "each job ran once");
+
+		const { rows } = await client.query(
+			`SELECT c.name, l.status
+			 FROM ${TABLE_PREFIX}__cron_run_log l
+			 JOIN ${TABLE_PREFIX}__cron c ON c.id = l.cron_id
+			 ORDER BY c.name`,
+		);
+		assert.deepStrictEqual(
+			rows,
+			names.map((name) => ({ name, status: RUN_STATUS.SUCCESS })),
+		);
 	} finally {
 		await cron.stop();
 		await client.end();

@@ -10,7 +10,7 @@ const cron = new Cron(options: CronOptions);
 
 | Option                | Type                                                        | Default        | Description                                                                                                                                                                                            |
 | --------------------- | ----------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `db`                  | `pg.Pool \| pg.Client`                                      | required       | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` is limited to one processor (see `start()`)                                                                                               |
+| `db`                  | `pg.Pool \| pg.Client`                                      | required       | PostgreSQL connection. Use a `pg.Pool`; a single `pg.Client` works too, its statements take turns (see `start()`)                                                                                      |
 | `tenantId`            | `string`                                                    | `"_default"`   | Tenant scope identifier — isolates all jobs to this tenant                                                                                                                                             |
 | `tablePrefix`         | `string`                                                    | `""`           | Prefix for table names (e.g. `"myschema."`)                                                                                                                                                            |
 | `pollTimeoutMs`       | `number`                                                    | `1000`         | Poll interval when no jobs are due (ms)                                                                                                                                                                |
@@ -54,7 +54,7 @@ await cron.start(2); // 2 concurrent workers (default)
 
 **Rejects** if the schema cannot be initialised, or if a `stop()` is still draining. Nothing is started in either case.
 
-With a single `pg.Client` as `db` the count is clamped to **1** (a warning is logged): a client is one session, so concurrent processors would run their statements inside each other's transactions. Pass a `pg.Pool` to run several.
+With a single `pg.Client` as `db` every processor shares that one session: each statement takes its turn, so handlers overlap but database work does not. A `pg.Pool` is still the recommendation.
 
 #### `cron.stop(options?: { drainTimeoutMs?: number }): Promise<void>`
 

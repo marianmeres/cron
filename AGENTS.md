@@ -58,7 +58,7 @@ tests/
   driver.test.ts          — 5 tests: a host's sqlkit Driver as `db`, non-pg dialect and missing db refused,
                             one driver (one pool `error` listener) per pool, CronDb exported
   cron-fixes-2.test.ts    — 19 tests, R1–R11: timezone, run-log tenant, missed ticks, start/stop lifecycle,
-                            shutdown during backoff, bookkeeping vs handler errors, pg.Client clamp,
+                            shutdown during backoff, bookkeeping vs handler errors, processors on one pg.Client,
                             heartbeat, healthPreview types, event-wrap tracking, SIGTERM listener
   statements.test.ts      — 10 tests, S1–S8: what statements read and write — payload and result JSON
                             round trips, run-log rows of success / error / timeout, fetchAll and
@@ -135,7 +135,7 @@ Currently used in:
 
 Inner helpers (`_logRunSuccess`, `_logRunError`, `_logRunStart`) accept an optional `client?: Driver` — pass `tx` for the transactional path, omit for autocommit. (Inside a transaction callback `tx` and `context.db` are the same object; the async context decides which transaction a statement is in. Pass `tx` anyway: it says what is meant.)
 
-A single `pg.Client` is one session: its driver reports `capabilities.concurrentWriters: false`, and `start()` clamps it to **one** processor (logs a warning). `pg.Pool` is the supported path for concurrency.
+A single `pg.Client` is one session, and `start(n)` runs all `n` processors on it: sqlkit's single-connection driver gives each transaction its turn, and a statement from outside an open transaction waits for it to end. Handlers overlap; database work does not. Do not clamp the count or branch on the adapter or on `capabilities` (the same holds for a host's `Driver` over one connection). `pg.Pool` stays the recommendation.
 
 ### 4. Lease token fence (CRITICAL for stale recovery)
 

@@ -142,8 +142,9 @@ await cron.register("job", "* * * * *", handler);
 await cron.start(1);
 ```
 
-Pass a `pg.Pool`. A single `pg.Client` is one database session, so `start()`
-runs at most **one** processor on it, whatever count you ask for.
+Pass a `pg.Pool`. A single `pg.Client` also works with several processors, but
+it is one database session: every statement takes its turn on it, so handlers
+overlap and their database work does not.
 
 `start()` rejects if the schema cannot be initialised — nothing is started in
 that case, so handle the rejection the way you would any failed boot step.
