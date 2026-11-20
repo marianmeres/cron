@@ -1,4 +1,5 @@
 import { CronParser } from "@marianmeres/cron-parser";
+import { EMPTY, json, raw, sql } from "@marianmeres/sqlkit";
 import type { CronContext, CronJob } from "./cron.ts";
 
 /**
@@ -32,13 +33,26 @@ export async function _register(
 		timezone: data.timezone ?? undefined,
 	}).getNextRun();
 
-	const conflictNextRun = forceRecalculate ? "next_run_at = EXCLUDED.next_run_at," : "";
+	const conflictNextRun = forceRecalculate
+		? sql`next_run_at = EXCLUDED.next_run_at,`
+		: EMPTY;
 
-	const { rows } = await db.query<CronJob>(
-		`INSERT INTO ${tableCron}
+	const { rows } = await db.query<CronJob>(sql`
+		INSERT INTO ${raw(tableCron)}
 			(tenant_id, name, expression, timezone, payload, enabled, next_run_at,
 			 max_attempts, max_attempt_duration_ms, backoff_strategy)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		VALUES (
+			${context.tenantId},
+			${data.name},
+			${data.expression},
+			${data.timezone},
+			${json(data.payload)},
+			${data.enabled},
+			${nextRunAt},
+			${data.max_attempts},
+			${data.max_attempt_duration_ms},
+			${data.backoff_strategy}
+		)
 		ON CONFLICT (tenant_id, name) DO UPDATE SET
 			expression              = EXCLUDED.expression,
 			timezone                = EXCLUDED.timezone,
@@ -49,20 +63,7 @@ export async function _register(
 			backoff_strategy        = EXCLUDED.backoff_strategy,
 			${conflictNextRun}
 			updated_at              = NOW()
-		RETURNING *`,
-		[
-			context.tenantId,
-			data.name,
-			data.expression,
-			data.timezone,
-			JSON.stringify(data.payload),
-			data.enabled,
-			nextRunAt,
-			data.max_attempts,
-			data.max_attempt_duration_ms,
-			data.backoff_strategy,
-		],
-	);
+		RETURNING *`);
 
 	return rows[0];
 }

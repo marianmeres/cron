@@ -1,3 +1,4 @@
+import { EMPTY, raw, sql } from "@marianmeres/sqlkit";
 import { _nextRunAt } from "./_next-run.ts";
 import {
 	BACKOFF_STRATEGY,
@@ -39,25 +40,19 @@ export async function _handleCronFailure(
 	const runStatus = isTimeout ? RUN_STATUS.TIMEOUT : RUN_STATUS.ERROR;
 
 	return await context.db.transaction(async (tx) => {
-		const params: unknown[] = [CRON_STATUS.IDLE, runStatus, nextRunAt, job.id];
-		let leaseClause = "";
-		if (leaseToken !== null) {
-			params.push(leaseToken);
-			leaseClause = ` AND lease_token = $${params.length}`;
-		}
+		const leaseFence =
+			leaseToken !== null ? sql`AND lease_token = ${leaseToken}` : EMPTY;
 
-		const { rows } = await tx.query<CronJob>(
-			`UPDATE ${tableCron}
-			SET status          = $1,
-				last_run_status = $2,
+		const { rows } = await tx.query<CronJob>(sql`
+			UPDATE ${raw(tableCron)}
+			SET status          = ${CRON_STATUS.IDLE},
+				last_run_status = ${runStatus},
 				last_run_at     = NOW(),
-				next_run_at     = $3,
+				next_run_at     = ${nextRunAt},
 				updated_at      = NOW(),
 				lease_token     = NULL
-			WHERE id = $4${leaseClause}
-			RETURNING *`,
-			params,
-		);
+			WHERE id = ${job.id} ${leaseFence}
+			RETURNING *`);
 
 		return (rows[0] as CronJob | undefined) ?? job;
 	});

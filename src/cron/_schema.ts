@@ -1,3 +1,4 @@
+import { sql } from "@marianmeres/sqlkit";
 import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
 
 export function _schemaDrop(context: Pick<CronContext, "tableNames">): string {
@@ -86,7 +87,7 @@ export function _schemaCreate(context: Pick<CronContext, "tableNames">): string 
 }
 
 export async function _initialize(context: CronContext, hard = false): Promise<void> {
-	const sql = [hard && _schemaDrop(context), _schemaCreate(context)]
+	const script = [hard && _schemaDrop(context), _schemaCreate(context)]
 		.filter(Boolean)
 		.join("\n");
 
@@ -94,11 +95,10 @@ export async function _initialize(context: CronContext, hard = false): Promise<v
 		// Serialize concurrent initializers (N replicas booting on a fresh database): two
 		// CREATE TABLE IF NOT EXISTS at once collide in pg_type. Transaction-scoped, so it
 		// is released by COMMIT or ROLLBACK.
-		await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
-			`cron:${context.tableNames.tableCron}`,
-		]);
+		const lockName = `cron:${context.tableNames.tableCron}`;
+		await tx.query(sql`SELECT pg_advisory_xact_lock(hashtext(${lockName}))`);
 		// A script of several statements: `exec`, never `query` (one statement only).
-		await tx.exec(sql);
+		await tx.exec(script);
 	});
 }
 

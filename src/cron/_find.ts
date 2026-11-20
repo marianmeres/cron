@@ -1,3 +1,4 @@
+import { and, EMPTY, raw, sql } from "@marianmeres/sqlkit";
 import type { CronContext, CronJob } from "./cron.ts";
 
 /** Finds a cron job by name (scoped to tenant). Returns `null` if not found. */
@@ -9,8 +10,7 @@ export async function _findByName(
 	const { tableCron } = tableNames;
 
 	const { rows } = await db.query<CronJob>(
-		`SELECT * FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`,
-		[context.tenantId, name],
+		sql`SELECT * FROM ${raw(tableCron)} WHERE tenant_id = ${context.tenantId} AND name = ${name}`,
 	);
 
 	return rows[0] ?? null;
@@ -35,33 +35,17 @@ export async function _fetchAll(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const params: unknown[] = [context.tenantId];
-	const conditions: string[] = [`tenant_id = $${params.length}`];
+	const where = and(
+		sql`tenant_id = ${context.tenantId}`,
+		options.enabled !== undefined ? sql`enabled = ${options.enabled}` : EMPTY,
+		options.status !== undefined ? sql`status = ${options.status}` : EMPTY,
+	);
 
-	if (options.enabled !== undefined) {
-		params.push(options.enabled);
-		conditions.push(`enabled = $${params.length}`);
-	}
-	if (options.status !== undefined) {
-		params.push(options.status);
-		conditions.push(`status = $${params.length}`);
-	}
-
-	const parts: string[] = [
-		`SELECT * FROM ${tableCron}`,
-		`WHERE ${conditions.join(" AND ")}`,
-		`ORDER BY name ASC`,
-	];
-
-	if (options.limit !== undefined) {
-		params.push(options.limit);
-		parts.push(`LIMIT $${params.length}`);
-	}
-	if (options.offset !== undefined) {
-		params.push(options.offset);
-		parts.push(`OFFSET $${params.length}`);
-	}
-
-	const { rows } = await db.query<CronJob>(parts.join(" "), params);
+	const { rows } = await db.query<CronJob>(sql`
+		SELECT * FROM ${raw(tableCron)}
+		WHERE ${where}
+		ORDER BY name ASC
+		${options.limit !== undefined ? sql`LIMIT ${options.limit}` : EMPTY}
+		${options.offset !== undefined ? sql`OFFSET ${options.offset}` : EMPTY}`);
 	return rows;
 }

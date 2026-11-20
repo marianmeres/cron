@@ -1,3 +1,4 @@
+import { EMPTY, raw, sql } from "@marianmeres/sqlkit";
 import { _logRunSuccess } from "./_log-run.ts";
 import { _nextRunAt } from "./_next-run.ts";
 import { CRON_STATUS, type CronContext, type CronJob, RUN_STATUS } from "./cron.ts";
@@ -31,30 +32,19 @@ export async function _handleCronSuccess(
 	const nextRunAt = _nextRunAt(job, scheduledAt);
 
 	return await context.db.transaction(async (tx) => {
-		const params: unknown[] = [
-			CRON_STATUS.IDLE,
-			RUN_STATUS.SUCCESS,
-			nextRunAt,
-			job.id,
-		];
-		let leaseClause = "";
-		if (leaseToken !== null) {
-			params.push(leaseToken);
-			leaseClause = ` AND lease_token = $${params.length}`;
-		}
+		const leaseFence =
+			leaseToken !== null ? sql`AND lease_token = ${leaseToken}` : EMPTY;
 
-		const { rows } = await tx.query<CronJob>(
-			`UPDATE ${tableCron}
-			SET status          = $1,
-				last_run_status = $2,
+		const { rows } = await tx.query<CronJob>(sql`
+			UPDATE ${raw(tableCron)}
+			SET status          = ${CRON_STATUS.IDLE},
+				last_run_status = ${RUN_STATUS.SUCCESS},
 				last_run_at     = NOW(),
-				next_run_at     = $3,
+				next_run_at     = ${nextRunAt},
 				updated_at      = NOW(),
 				lease_token     = NULL
-			WHERE id = $4${leaseClause}
-			RETURNING *`,
-			params,
-		);
+			WHERE id = ${job.id} ${leaseFence}
+			RETURNING *`);
 
 		// Always finalise the run log — the run did happen, even if the lease was lost
 		await _logRunSuccess(context, runLogId, result, tx);

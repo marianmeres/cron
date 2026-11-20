@@ -1,3 +1,4 @@
+import { EMPTY, raw, sql } from "@marianmeres/sqlkit";
 import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
 
 /**
@@ -12,7 +13,7 @@ import { CRON_STATUS, type CronContext, RUN_STATUS } from "./cron.ts";
  * time: a live worker on a long job keeps its claim, a dead one loses it.
  *
  * `lease_token` is cleared on the row. If the original (still-alive) worker
- * later returns to write a result, its `WHERE ... AND lease_token = $`
+ * later returns to write a result, its `WHERE ... AND lease_token = …`
  * predicate fails and the write is silently dropped — preventing it from
  * clobbering whatever fresh execution has happened in the meantime.
  *
@@ -28,43 +29,15 @@ export async function _markStale(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	if (tenantScoped) {
-		const result = await db.query(
-			`UPDATE ${tableCron}
-			SET status          = $1,
-				last_run_status = $2,
-				next_run_at     = NOW(),
-				updated_at      = NOW(),
-				lease_token     = NULL
-			WHERE status = $3
-			  AND tenant_id = $4
-			  AND last_run_at < NOW() - ($5 * INTERVAL '1 minute')`,
-			[
-				CRON_STATUS.IDLE,
-				RUN_STATUS.ERROR,
-				CRON_STATUS.RUNNING,
-				context.tenantId,
-				maxAllowedRunDurationMinutes,
-			],
-		);
-		return result.rowCount;
-	}
-
-	const result = await db.query(
-		`UPDATE ${tableCron}
-		SET status          = $1,
-			last_run_status = $2,
+	const result = await db.query(sql`
+		UPDATE ${raw(tableCron)}
+		SET status          = ${CRON_STATUS.IDLE},
+			last_run_status = ${RUN_STATUS.ERROR},
 			next_run_at     = NOW(),
 			updated_at      = NOW(),
 			lease_token     = NULL
-		WHERE status = $3
-		  AND last_run_at < NOW() - ($4 * INTERVAL '1 minute')`,
-		[
-			CRON_STATUS.IDLE,
-			RUN_STATUS.ERROR,
-			CRON_STATUS.RUNNING,
-			maxAllowedRunDurationMinutes,
-		],
-	);
+		WHERE status = ${CRON_STATUS.RUNNING}
+			${tenantScoped ? sql`AND tenant_id = ${context.tenantId}` : EMPTY}
+			AND last_run_at < NOW() - (${maxAllowedRunDurationMinutes} * INTERVAL '1 minute')`);
 	return result.rowCount;
 }

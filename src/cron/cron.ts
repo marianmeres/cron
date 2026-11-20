@@ -2,7 +2,7 @@ import process from "node:process";
 import { createClog, type Logger } from "@marianmeres/clog";
 import { CronParser } from "@marianmeres/cron-parser";
 import { createPubSub, type Subscriber, type Unsubscriber } from "@marianmeres/pubsub";
-import type { Driver } from "@marianmeres/sqlkit";
+import { type Driver, raw, sql } from "@marianmeres/sqlkit";
 import { _claimNextCronJob } from "./_claim-next.ts";
 import { _executeCronJob } from "./_execute.ts";
 import { _fetchAll, _findByName } from "./_find.ts";
@@ -638,10 +638,9 @@ export class Cron {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
-		await db.query(`DELETE FROM ${tableCron} WHERE tenant_id = $1 AND name = $2`, [
-			tenantId,
-			name,
-		]);
+		await db.query(
+			sql`DELETE FROM ${raw(tableCron)} WHERE tenant_id = ${tenantId} AND name = ${name}`,
+		);
 		this.#handlers.delete(this.#handlerKey(tenantId, name));
 	}
 
@@ -660,19 +659,17 @@ export class Cron {
 		const resumeAt =
 			current && !current.enabled ? _nextRunAt(current, new Date()) : null;
 
-		const { rows } = await db.query<CronJob>(
-			`UPDATE ${tableCron}
+		const { rows } = await db.query<CronJob>(sql`
+			UPDATE ${raw(tableCron)}
 			SET enabled     = TRUE,
 				next_run_at = CASE
-					WHEN enabled = FALSE AND next_run_at <= NOW() AND $3::timestamptz IS NOT NULL
-						THEN $3::timestamptz
+					WHEN enabled = FALSE AND next_run_at <= NOW() AND ${resumeAt}::timestamptz IS NOT NULL
+						THEN ${resumeAt}::timestamptz
 					ELSE next_run_at
 				END,
 				updated_at  = NOW()
-			WHERE tenant_id = $1 AND name = $2
-			RETURNING *`,
-			[tenantId, name, resumeAt],
-		);
+			WHERE tenant_id = ${tenantId} AND name = ${name}
+			RETURNING *`);
 		return rows[0];
 	}
 
@@ -680,13 +677,11 @@ export class Cron {
 		await this.#initializeOnce();
 		const { db, tableNames } = this.#context;
 		const { tableCron } = tableNames;
-		const { rows } = await db.query<CronJob>(
-			`UPDATE ${tableCron}
+		const { rows } = await db.query<CronJob>(sql`
+			UPDATE ${raw(tableCron)}
 			SET enabled = FALSE, updated_at = NOW()
-			WHERE tenant_id = $1 AND name = $2
-			RETURNING *`,
-			[tenantId, name],
-		);
+			WHERE tenant_id = ${tenantId} AND name = ${name}
+			RETURNING *`);
 		return rows[0];
 	}
 
@@ -1466,8 +1461,7 @@ export class Cron {
 				expr: string,
 			) => {
 				const exists = await tx.query(
-					`SELECT 1 FROM pg_constraint WHERE conname = $1`,
-					[name.toLowerCase()],
+					sql`SELECT 1 FROM pg_constraint WHERE conname = ${name.toLowerCase()}`,
 				);
 				if (exists.rowCount === 0) {
 					await tx.exec(

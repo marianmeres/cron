@@ -1,4 +1,4 @@
-import type { Driver } from "@marianmeres/sqlkit";
+import { and, type Driver, EMPTY, json, raw, sql } from "@marianmeres/sqlkit";
 import { type CronContext, type CronRunLog, RUN_STATUS } from "./cron.ts";
 
 /** Opens a new run log entry. Returns the inserted row id. */
@@ -14,12 +14,10 @@ export async function _logRunStart(
 	const { tableCronRunLog } = tableNames;
 	const q = client ?? db;
 
-	const { rows } = await q.query<{ id: number }>(
-		`INSERT INTO ${tableCronRunLog} (cron_id, cron_name, tenant_id, scheduled_at, attempt_number)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id`,
-		[cronId, cronName, context.tenantId, scheduledAt, attemptNumber],
-	);
+	const { rows } = await q.query<{ id: number }>(sql`
+		INSERT INTO ${raw(tableCronRunLog)} (cron_id, cron_name, tenant_id, scheduled_at, attempt_number)
+		VALUES (${cronId}, ${cronName}, ${context.tenantId}, ${scheduledAt}, ${attemptNumber})
+		RETURNING id`);
 
 	return rows[0].id;
 }
@@ -40,6 +38,8 @@ export async function _logRunSuccess(
 	const { tableCronRunLog } = tableNames;
 	const q = client ?? db;
 
+	// Already JSON text (with its own fallback): bound as it is, never through `json()`,
+	// which would store a JSON string holding JSON.
 	let serialized: string;
 	try {
 		serialized = JSON.stringify(result ?? null);
@@ -47,14 +47,12 @@ export async function _logRunSuccess(
 		serialized = "null";
 	}
 
-	await q.query(
-		`UPDATE ${tableCronRunLog}
-		SET status = $1,
+	await q.query(sql`
+		UPDATE ${raw(tableCronRunLog)}
+		SET status = ${RUN_STATUS.SUCCESS},
 			completed_at = NOW(),
-			result = $2
-		WHERE id = $3`,
-		[RUN_STATUS.SUCCESS, serialized, runLogId],
-	);
+			result = ${serialized}
+		WHERE id = ${runLogId}`);
 }
 
 /** Finalises a run log entry as error or timeout. */
@@ -70,15 +68,14 @@ export async function _logRunError(
 	const { tableCronRunLog } = tableNames;
 	const q = client ?? db;
 
-	await q.query(
-		`UPDATE ${tableCronRunLog}
-		SET status = $1,
+	// `json(null)` binds SQL NULL
+	await q.query(sql`
+		UPDATE ${raw(tableCronRunLog)}
+		SET status = ${status},
 			completed_at = NOW(),
-			error_message = $2,
-			error_details = $3
-		WHERE id = $4`,
-		[status, errMessage, errDetails ? JSON.stringify(errDetails) : null, runLogId],
-	);
+			error_message = ${errMessage},
+			error_details = ${json(errDetails)}
+		WHERE id = ${runLogId}`);
 }
 
 /** Fetches the execution history for a given cron_id, newest first. */
@@ -94,26 +91,20 @@ export async function _logRunFetchAll(
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 
-	const parts: string[] = [`SELECT * FROM ${tableCronRunLog} WHERE cron_id = $1`];
-	const params: (number | string | Date)[] = [cronId];
+	// `sinceMinutesAgo` keeps its truthiness test: `0` means no window
+	const where = and(
+		sql`cron_id = ${cronId}`,
+		options.sinceMinutesAgo
+			? sql`started_at > NOW() - (${options.sinceMinutesAgo} * INTERVAL '1 minute')`
+			: EMPTY,
+	);
 
-	if (options.sinceMinutesAgo) {
-		params.push(options.sinceMinutesAgo);
-		parts.push(`AND started_at > NOW() - ($${params.length} * INTERVAL '1 minute')`);
-	}
-
-	parts.push("ORDER BY id DESC");
-
-	if (options.limit !== undefined) {
-		params.push(options.limit);
-		parts.push(`LIMIT $${params.length}`);
-	}
-	if (options.offset !== undefined) {
-		params.push(options.offset);
-		parts.push(`OFFSET $${params.length}`);
-	}
-
-	const { rows } = await db.query<CronRunLog>(parts.join(" "), params);
+	const { rows } = await db.query<CronRunLog>(sql`
+		SELECT * FROM ${raw(tableCronRunLog)}
+		WHERE ${where}
+		ORDER BY id DESC
+		${options.limit !== undefined ? sql`LIMIT ${options.limit}` : EMPTY}
+		${options.offset !== undefined ? sql`OFFSET ${options.offset}` : EMPTY}`);
 	return rows;
 }
 
@@ -131,17 +122,9 @@ export async function _logRunPrune(
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 
-	const sql = tenantScoped
-		? `DELETE FROM ${tableCronRunLog}
-		   WHERE tenant_id = $1
-		     AND started_at < NOW() - ($2 * INTERVAL '1 minute')`
-		: `DELETE FROM ${tableCronRunLog}
-		   WHERE started_at < NOW() - ($1 * INTERVAL '1 minute')`;
-
-	const params = tenantScoped
-		? [context.tenantId, olderThanMinutes]
-		: [olderThanMinutes];
-
-	const result = await db.query(sql, params);
+	const result = await db.query(sql`
+		DELETE FROM ${raw(tableCronRunLog)}
+		WHERE started_at < NOW() - (${olderThanMinutes} * INTERVAL '1 minute')
+			${tenantScoped ? sql`AND tenant_id = ${context.tenantId}` : EMPTY}`);
 	return result.rowCount;
 }

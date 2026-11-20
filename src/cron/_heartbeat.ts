@@ -1,3 +1,4 @@
+import { raw, sql } from "@marianmeres/sqlkit";
 import type { CronContext, CronJob } from "./cron.ts";
 import { unrefTimer } from "./utils/unref-timer.ts";
 
@@ -50,12 +51,10 @@ export function _startHeartbeat(
 		if (stopped || inFlight) return;
 		inFlight = true;
 		try {
-			const res = await db.query(
-				`UPDATE ${tableCron}
+			const res = await db.query(sql`
+				UPDATE ${raw(tableCron)}
 				SET last_run_at = NOW()
-				WHERE id = $1 AND lease_token = $2`,
-				[job.id, leaseToken],
-			);
+				WHERE id = ${job.id} AND lease_token = ${leaseToken}`);
 			if (!stopped && res.rowCount === 0) {
 				stop();
 				logger?.warn?.(`Cron job ${label}: lease lost, aborting this execution`);

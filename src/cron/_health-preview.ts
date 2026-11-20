@@ -1,3 +1,4 @@
+import { raw, sql } from "@marianmeres/sqlkit";
 import type { CronContext, CronHealthPreviewRow } from "./cron.ts";
 
 /**
@@ -16,21 +17,19 @@ export async function _healthPreview(
 	const { db, tableNames } = context;
 	const { tableCronRunLog } = tableNames;
 
-	const { rows } = await db.query<CronHealthPreviewRow>(
-		`SELECT
+	const { rows } = await db.query<CronHealthPreviewRow>(sql`
+		SELECT
 			status,
 			COUNT(*)::int AS count,
 			ROUND(
 				AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))::numeric,
 				3
 			)::float8 AS avg_duration_seconds
-		FROM ${tableCronRunLog}
-		WHERE tenant_id = $1
-		  AND started_at > NOW() - ($2 * INTERVAL '1 minute')
+		FROM ${raw(tableCronRunLog)}
+		WHERE tenant_id = ${context.tenantId}
+		  AND started_at > NOW() - (${sinceMinutesAgo} * INTERVAL '1 minute')
 		GROUP BY status
-		ORDER BY status`,
-		[context.tenantId, sinceMinutesAgo],
-	);
+		ORDER BY status`);
 
 	return rows;
 }

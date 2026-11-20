@@ -34,7 +34,7 @@ src/
     _handle-success.ts    — next_run_at via _nextRunAt after success; real TX (db.transaction); lease_token fence
     _handle-failure.ts    — next_run_at via _nextRunAt after all attempts fail; real TX; lease_token fence
                             also exports _backoffMs and DEFAULT_MAX_BACKOFF_MS (5 min)
-    _find.ts              — _findByName, _fetchAll (tenant-scoped, fully parameterised)
+    _find.ts              — _findByName, _fetchAll (tenant-scoped; optional filters through and())
     _log-run.ts           — run log CRUD + _logRunPrune
     _mark-stale.ts        — crash recovery: reset RUNNING jobs with no recent sign of life (clears lease_token)
     _health-preview.ts    — aggregate stats from run log (tenant-scoped)
@@ -46,7 +46,6 @@ src/
       unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
       with-db-retry.ts    — withDbRetry() with exponential backoff
       db-health.ts        — DbHealthMonitor, checkDbHealth() (take a CronDb, query via toDriver)
-      pg-quote.ts         — pgQuoteIdentifier, pgQuoteValue (kept for legacy callers)
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
   _time.ts                — clearOfMinuteBoundary(): waits a near minute boundary out before a test
@@ -104,14 +103,20 @@ Do not "simplify" this to `getNextRun(now)`: a worker whose clock lags the DB wo
 
 ```typescript
 await context.db.transaction(async (tx) => {
-  await tx.query("UPDATE …", [/* values */]);
+  await tx.query(sql`UPDATE ${raw(tableCron)} SET … WHERE id = ${job.id}`);
   await someHelper(context, …, tx);  // pass tx through to inner helpers
 });
 ```
 
 The driver checks the `COMMIT` (a transaction a failed statement aborted rejects with `TransactionAbortedError`), destroys a connection whose `ROLLBACK` failed, and wraps every database error in a sqlkit `SqlError` (node-postgres's `code` and `message`, the original as `cause`).
 
-- `query(text, values)` runs **one** statement; a script of several (the schema, `_schemaDrop`, the `Cron.migrate` steps) goes through `exec(script)`, which takes no values.
+- `query(statement)` runs **one** statement; a script of several (the schema, `_schemaDrop`, the `Cron.migrate` steps) goes through `exec(script)`, which takes no values.
+- Every statement is one sqlkit `sql` fragment; nothing is numbered by hand (`$1`) and no value is written into the text. The rules:
+  - A value is interpolated bare and bound: `status = ${CRON_STATUS.IDLE}`. Quotes around an interpolation (`'${x}'`) are a bug: a literal holding `$1`.
+  - The table name is the only text spliced in, as `raw(tableCron)` / `raw(tableCronRunLog)`, never `ident()`: a prefix may carry a schema (`"app."`), and unquoted names fold to lower case (a quoted mixed-case prefix would name another table). Nothing a caller supplied goes through `raw()`.
+  - An optional predicate is a fragment or `EMPTY` (``leaseToken !== null ? sql`AND lease_token = ${leaseToken}` : EMPTY``); a list of optional filters goes through `and()`, which skips `EMPTY` parts.
+  - A JSON column takes `json(value)` (`json(null)` binds SQL `NULL`), except the run result, which `_logRunSuccess` serializes itself and binds as the string it is.
+  - Minutes stay `(${n} * INTERVAL '1 minute')`: a fraction of a minute is valid input.
 - Type a row read: `db.query<CronJob>(…)`. `rowCount` is always a number.
 - Never call the driver's `close()`: it ends the host's pool or client. `toDriver` caches one driver per pool/client object (a `WeakMap`) because building one adds an `error` listener to the pool; a host's own `Driver` is used as it is.
 
@@ -366,6 +371,7 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For scheduling logic changes: go through `_nextRunAt` (`_next-run.ts`); never compute `next_run_at` elsewhere
 - [ ] For anything written on behalf of a claimed job: use the job-tenant context, keep it OUTSIDE the handler's `try`
 - [ ] For new write paths against a claimed row: include `lease_token` fence in WHERE
+- [ ] For a new statement: one `sql` fragment, values interpolated bare, the table as `raw(tableCron)` (see §3)
 - [ ] For multi-statement DB work: use `context.db.transaction(async (tx) => …)` (never send `BEGIN` yourself); a script of several statements goes through `exec`
 - [ ] For new management queries: always include `tenant_id` filtering
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)

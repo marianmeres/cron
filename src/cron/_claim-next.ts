@@ -1,3 +1,4 @@
+import { raw, sql } from "@marianmeres/sqlkit";
 import { CRON_STATUS, type CronContext, type CronJob } from "./cron.ts";
 
 /**
@@ -18,24 +19,22 @@ export async function _claimNextCronJob(
 	const { db, tableNames } = context;
 	const { tableCron } = tableNames;
 
-	const result = await db.query<CronJob & { lease_token: string }>(
-		`UPDATE ${tableCron}
-		SET status      = $1,
+	const result = await db.query<CronJob & { lease_token: string }>(sql`
+		UPDATE ${raw(tableCron)}
+		SET status      = ${CRON_STATUS.RUNNING},
 			last_run_at = NOW(),
 			updated_at  = NOW(),
 			lease_token = gen_random_uuid()
 		WHERE id = (
-			SELECT id FROM ${tableCron}
+			SELECT id FROM ${raw(tableCron)}
 			WHERE enabled = TRUE
-			  AND status = $2
+			  AND status = ${CRON_STATUS.IDLE}
 			  AND next_run_at <= NOW()
 			ORDER BY next_run_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING *`,
-		[CRON_STATUS.RUNNING, CRON_STATUS.IDLE],
-	);
+		RETURNING *`);
 
 	const row = result.rows[0] as (CronJob & { lease_token: string }) | undefined;
 	if (!row) return null;
