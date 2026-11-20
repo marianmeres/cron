@@ -484,7 +484,7 @@ try {
 }
 ```
 
-`instanceof` holds against the copy of `@marianmeres/sqlkit` that cron itself resolves; `kind` and `code` hold whatever copy you import.
+`instanceof` holds across copies of `@marianmeres/sqlkit`, when the copy you import is 0.3.0 or newer: an app on another sqlkit minor than cron's still catches cron's errors by their class. Against an older copy it holds only for the copy cron itself resolves; `kind` and `code` hold whatever copy you import.
 
 ---
 

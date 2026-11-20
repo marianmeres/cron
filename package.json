@@ -57,17 +57,17 @@
     "test:watch": "node --test --test-concurrency=1 --watch --env-file-if-exists=.env \"tests/**/*.test.ts\"",
     "ci": "pnpm run typecheck && pnpm run lint && pnpm test",
     "prepublishOnly": "pnpm run ci && pnpm run build",
-    "release": "npx --yes @marianmeres/release@^2.2.0",
+    "release": "npx --yes @marianmeres/release@^2.3.0",
     "rp": "pnpm run release -y && pnpm publish",
     "rpm": "pnpm run release minor -y && pnpm publish"
   },
   "dependencies": {
-    "@marianmeres/clog": "^3.23.0",
+    "@marianmeres/clog": "^3.23.1",
     "@marianmeres/cron-parser": "^1.0.1",
     "@marianmeres/modelize": "^3.0.0",
-    "@marianmeres/parse-boolean": "^2.1.0",
-    "@marianmeres/pubsub": "^3.0.0",
-    "@marianmeres/sqlkit": "^0.2.0"
+    "@marianmeres/parse-boolean": "^2.2.0",
+    "@marianmeres/pubsub": "^3.1.0",
+    "@marianmeres/sqlkit": "^0.3.1"
   },
   "peerDependencies": {
     "ajv": "^8.20.0"

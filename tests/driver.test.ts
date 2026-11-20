@@ -80,6 +80,7 @@ function sqliteStub(): Driver {
 		exec: async () => {},
 		transaction: async (fn) => await fn(stub),
 		exclusive: async (_name, fn) => await fn(stub),
+		savepoint: async (fn) => await fn(stub),
 		close: async () => {},
 	} as Driver;
 	return stub;
