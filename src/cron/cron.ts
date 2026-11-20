@@ -22,6 +22,7 @@ import { sleep } from "./utils/sleep.ts";
 import { type DbRetryOptions, withDbRetry } from "./utils/with-db-retry.ts";
 
 export type { CronDb } from "./utils/driver.ts";
+export type { DbRetryOptions } from "./utils/with-db-retry.ts";
 
 /**
  * Default tenant identifier used when no `tenantId` is specified.

@@ -44,7 +44,8 @@ src/
       driver.ts           — CronDb (pg.Pool | pg.Client | sqlkit Driver), toDriver() (one cached driver
                             per pool/client, refuses a non-pg dialect), isDriver(), isPool()
       unref-timer.ts      — unrefTimer(): Node's .unref(), a no-op where the timer has none
-      with-db-retry.ts    — withDbRetry() with exponential backoff
+      with-db-retry.ts    — withDbRetry() + DbRetryOptions on sqlkit's withRetry: retries what classifyPg
+                            calls retryable, or exactly a caller's retryableErrors
       db-health.ts        — DbHealthMonitor, checkDbHealth() (take a CronDb, query via toDriver)
 tests/
   _pg.ts                  — createPg() / createPgClient() from TEST_PG_* env vars
@@ -60,6 +61,8 @@ tests/
   statements.test.ts      — 10 tests, S1–S8: what statements read and write — payload and result JSON
                             round trips, run-log rows of success / error / timeout, fetchAll and
                             getRunHistory filters and pages, unregister cascade, checkDbHealth / getDbHealth
+  db-resilience.test.ts   — 4 tests: what withDbRetry retries by default and with retryableErrors, a
+                            TypeError for an option out of range, dbRetry around the claim
   task-registry.test.ts   — 9 tests: registry unit tests + syncRegistryToCron integration
 package.json              — manifest of record: version, npm exports, deps, optional peer ajv, scripts
 tsconfig.json             — type gate (src + tests, noEmit)
@@ -162,6 +165,8 @@ Jobs toggle between `idle ↔ running` only. There are no terminal states in the
 The first attempt always runs. Attempts 2+ are skipped once the shutdown signal is aborted or the lease is lost; the cycle then ends through `_handleCronFailure`.
 
 **Handler errors vs bookkeeping errors.** Only an error thrown by the handler is a failed attempt. The handler call sits in its own `try`; the DB writes that record the outcome (`_logRunStart`, `_handleCronSuccess`, `_logRunError`, `_handleCronFailure`) sit outside it, wrapped in `options.withRetry` (the `dbRetry`-aware wrapper from `Cron`). If one of them still fails, `_executeCronJob` throws; the processor logs "could not record the run" and the row stays `running` until `cleanup()`. Never move those writes back inside the handler's `try` — a DB blip after a successful handler would be logged as a handler error and the handler re-run.
+
+**`dbRetry`** (`withDbRetry`) runs the wrapped function again whole, so it wraps one statement or one whole `db.transaction` call, never part of a transaction. By default it retries what sqlkit's `classifyPg` calls retryable (a lost connection, a deadlock, a serialization failure, …), decided by the error's code (or node-postgres's two code-less connection messages), never by a code found in a message; a caller's `retryableErrors` replaces that with exactly its list.
 
 ### 9. Table prefix
 
@@ -318,6 +323,7 @@ The legacy rename uses a `colExists()` JS helper to build an `information_schema
 - Test 33: legacy migration with a mixed-case `tablePrefix`, run twice — `colExists()` and `addCheckIfMissing` lower-case identifiers to match Postgres folding (else the rename silently no-ops, or the second call re-adds a CHECK constraint and fails)
 - `tests/task-registry.test.ts`: registry unit tests (no DB) + `syncRegistryToCron` integration test
 - `tests/cron-fixes.test.ts`: covers the finalization's transaction (B1: one connection from `begin` to `commit`; a failed run-log write rolls the job row back — `recordCheckouts()` records each checkout's statements), lease_token fence, onEvent unsubscribe semantics, drainTimeoutMs cap, AbortSignal propagation, autoCleanup, backoff cap, pruneRunLog, sync orphan-handler removal
+- `tests/db-resilience.test.ts`: the retry tests call `withDbRetry` directly with driver-shaped errors (`Object.assign(new Error(…), { code })`), no database; the `dbRetry` test arms `failNextCheckouts(db, 2, "ECONNREFUSED")` before `start(1)`, so the refused checkouts are the claim's (the instance is initialized by then)
 - `tests/statements.test.ts` (S1–S8): pins, through the public API, what a statement binds and reads back — payload, result and `error_details` after the JSON round trip, the optional filters and pages of `fetchAll` / `getRunHistory`, the unregister cascade, and the health status. A change to how statements are built must keep it green unchanged. It deliberately does not assert the `latencyMs` or the error text of an unhealthy status, nor the class of a rejected database call. Its `settled(cron, names)` helper waits for each job's `onDone` / `onError`
 
 ### Avoiding leaked timers in tests with abandoned handlers
@@ -352,7 +358,8 @@ export { Cron, DEFAULT_TENANT_ID } from "./cron.ts";
 export { CRON_STATUS, RUN_STATUS, BACKOFF_STRATEGY } from "./cron.ts";
 export type { CronJob, CronRunLog, CronHealthPreviewRow, CronHandler,
               CronOptions, CronRegisterOptions, CronContext,
-              CronTenantScope, CronStopOptions, CronDb } from "./cron.ts";
+              CronTenantScope, CronStopOptions, CronDb,
+              DbRetryOptions } from "./cron.ts";
 export { CronParser, type CronParserOptions } from "@marianmeres/cron-parser"; // re-export
 
 // Task Registry
@@ -377,5 +384,5 @@ export type { SyncRegistryResult } from "./sync-registry.ts";
 - [ ] For processor-level logic: do NOT filter by `tenant_id` (processors are global)
 - [ ] For waits inside processor loops or handlers: plumb the appropriate AbortSignal through
 - [ ] For schema changes: extend `Cron.migrate` with an idempotent step
-- [ ] Run `pnpm run ci` after changes (typecheck + lint + 91 tests); `pnpm run format` before committing
+- [ ] Run `pnpm run ci` after changes (typecheck + lint + 95 tests); `pnpm run format` before committing
 - [ ] DB integration tests require `TEST_PG_*` env vars
